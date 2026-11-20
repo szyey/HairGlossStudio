@@ -1,0 +1,503 @@
+using System;
+using System.Collections.Generic;
+using UnityEditor;
+using UnityEngine;
+
+namespace HairGlossStudio.Editor
+{
+    /// <summary>
+    /// Renders a 2D synthetic hair dome preview inside the EditorWindow and manages
+    /// transient non-saved materials for live SceneView previewing.
+    /// </summary>
+    public class HairGlossPreviewRenderer : IDisposable
+    {
+        private class ScenePreviewEntry
+        {
+            public Renderer renderer;
+            public int submeshIndex;
+            public Material restoreMaterial;
+            public Material transientMaterial;
+        }
+
+        private const int PreviewResolution = 256;
+
+        private readonly List<ScenePreviewEntry> activeScenePreviews = new List<ScenePreviewEntry>();
+
+        private Mesh cachedMesh;
+        private int cachedSubmesh = -1;
+        private Texture2D cachedMainTex;
+        private float cachedFlowWeight = -1f;
+        private bool cachedAutoAnalyze;
+        private HairFlowAnalyzer.AnalysisResult cachedAnalysis;
+
+        private Texture2D normalPreviewTex;
+        private Texture2D matCapPreviewTex;
+        private Texture2D maskPreviewTex;
+        private Texture2D domePreviewTex;
+
+        public Texture2D NormalPreview => normalPreviewTex;
+        public Texture2D MatCapPreview => matCapPreviewTex;
+        public Texture2D MaskPreview => maskPreviewTex;
+        public Texture2D DomePreview => domePreviewTex;
+        public bool HasActiveScenePreview => activeScenePreviews.Count > 0;
+
+        public HairGlossPreviewRenderer()
+        {
+            AssemblyReloadEvents.beforeAssemblyReload += ClearScenePreview;
+            EditorApplication.quitting += ClearScenePreview;
+        }
+
+        public void Dispose()
+        {
+            AssemblyReloadEvents.beforeAssemblyReload -= ClearScenePreview;
+            EditorApplication.quitting -= ClearScenePreview;
+            ClearScenePreview();
+            DestroyPreviewTextures();
+        }
+
+        public void InvalidateAnalysisCache()
+        {
+            cachedAnalysis = null;
+            cachedMesh = null;
+            cachedMainTex = null;
+            cachedSubmesh = -1;
+        }
+
+        public void RebuildPreviews(HairMaterialTarget referenceTarget, HairGlossSettings settings)
+        {
+            if (settings == null)
+            {
+                return;
+            }
+
+            Mesh mesh = referenceTarget != null ? referenceTarget.mesh : null;
+            int submesh = referenceTarget != null ? referenceTarget.submeshIndex : 0;
+            Texture2D mainTex = null;
+            Color baseColor = new Color(0.28f, 0.22f, 0.20f, 1f);
+
+            Material baseMat = referenceTarget != null
+                ? (referenceTarget.originalMaterial != null ? referenceTarget.originalMaterial : referenceTarget.currentMaterial)
+                : null;
+
+            if (baseMat != null)
+            {
+                if (baseMat.HasProperty("_MainTex"))
+                {
+                    mainTex = baseMat.GetTexture("_MainTex") as Texture2D;
+                }
+                if (baseMat.HasProperty("_Color"))
+                {
+                    baseColor = baseMat.GetColor("_Color");
+                }
+            }
+
+            float flowWeight = settings.autoAnalyzeFlow ? settings.flowAnalyzeWeight : 0f;
+
+            bool needsReanalysis = cachedAnalysis == null
+                                   || cachedMesh != mesh
+                                   || cachedSubmesh != submesh
+                                   || cachedMainTex != mainTex
+                                   || Mathf.Abs(cachedFlowWeight - flowWeight) > 0.001f
+                                   || cachedAutoAnalyze != settings.autoAnalyzeFlow;
+
+            if (needsReanalysis)
+            {
+                cachedAnalysis = HairFlowAnalyzer.AnalyzeFlowField(
+                    mesh,
+                    submesh,
+                    mainTex,
+                    PreviewResolution,
+                    flowWeight);
+                cachedMesh = mesh;
+                cachedSubmesh = submesh;
+                cachedMainTex = mainTex;
+                cachedFlowWeight = flowWeight;
+                cachedAutoAnalyze = settings.autoAnalyzeFlow;
+            }
+
+            DestroyPreviewTextures();
+
+            normalPreviewTex = HairTextureGenerator.GenerateFlowNormalMap(cachedAnalysis, settings);
+            normalPreviewTex.hideFlags = HideFlags.HideAndDontSave;
+
+            Color avgBase = cachedAnalysis != null
+                ? new Color(
+                    cachedAnalysis.averageBaseColor.r * baseColor.r,
+                    cachedAnalysis.averageBaseColor.g * baseColor.g,
+                    cachedAnalysis.averageBaseColor.b * baseColor.b,
+                    1f)
+                : baseColor;
+
+            matCapPreviewTex = HairTextureGenerator.GenerateGlossMatCap(settings, avgBase, PreviewResolution);
+            matCapPreviewTex.hideFlags = HideFlags.HideAndDontSave;
+
+            maskPreviewTex = HairTextureGenerator.GenerateGlossMask(cachedAnalysis, settings);
+            maskPreviewTex.hideFlags = HideFlags.HideAndDontSave;
+
+            domePreviewTex = RenderSyntheticHairDome(settings, avgBase, normalPreviewTex, matCapPreviewTex);
+            domePreviewTex.hideFlags = HideFlags.HideAndDontSave;
+        }
+
+        public void UpdateScenePreview(
+            List<HairMaterialTarget> targets,
+            HairGlossSettings settings,
+            HairGlossBackupStore backupStore)
+        {
+            if (targets == null || settings == null)
+            {
+                ClearScenePreview();
+                return;
+            }
+
+            if (normalPreviewTex == null || matCapPreviewTex == null || maskPreviewTex == null)
+            {
+                HairMaterialTarget firstSelected = FindFirstSelectedLilToon(targets);
+                RebuildPreviews(firstSelected, settings);
+            }
+
+            // Build lookup of currently active previewed slots
+            var desiredKeys = new HashSet<string>();
+            foreach (HairMaterialTarget t in targets)
+            {
+                if (t == null || !t.isSelected || !t.isLilToon || t.renderer == null)
+                {
+                    continue;
+                }
+
+                string key = MakeSlotKey(t.renderer, t.submeshIndex);
+                desiredKeys.Add(key);
+
+                ScenePreviewEntry existing = FindScenePreviewEntry(t.renderer, t.submeshIndex);
+                Material sourceMat = ResolveSourceMaterial(t, backupStore, existing);
+                if (sourceMat == null)
+                {
+                    continue;
+                }
+
+                if (existing == null)
+                {
+                    Material[] mats = t.renderer.sharedMaterials;
+                    if (mats == null || t.submeshIndex < 0 || t.submeshIndex >= mats.Length)
+                    {
+                        continue;
+                    }
+
+                    Material transient = new Material(sourceMat)
+                    {
+                        name = $"{sourceMat.name}_HairGlossPreview",
+                        hideFlags = HideFlags.DontSave
+                    };
+
+                    existing = new ScenePreviewEntry
+                    {
+                        renderer = t.renderer,
+                        submeshIndex = t.submeshIndex,
+                        restoreMaterial = mats[t.submeshIndex],
+                        transientMaterial = transient
+                    };
+                    activeScenePreviews.Add(existing);
+
+                    mats[t.submeshIndex] = transient;
+                    t.renderer.sharedMaterials = mats;
+                }
+                else
+                {
+                    // Refresh transient properties from original base material
+                    if (existing.transientMaterial.shader != sourceMat.shader)
+                    {
+                        existing.transientMaterial.shader = sourceMat.shader;
+                    }
+                    existing.transientMaterial.CopyPropertiesFromMaterial(sourceMat);
+                    Material[] mats = t.renderer.sharedMaterials;
+                    if (mats != null && t.submeshIndex >= 0 && t.submeshIndex < mats.Length &&
+                        mats[t.submeshIndex] != existing.transientMaterial)
+                    {
+                        mats[t.submeshIndex] = existing.transientMaterial;
+                        t.renderer.sharedMaterials = mats;
+                    }
+                }
+
+                LilToonMaterialConfigurator.ConfigureMaterial(
+                    existing.transientMaterial,
+                    settings,
+                    normalPreviewTex,
+                    matCapPreviewTex,
+                    maskPreviewTex);
+            }
+
+            // Revert any entries no longer selected
+            for (int i = activeScenePreviews.Count - 1; i >= 0; i--)
+            {
+                ScenePreviewEntry entry = activeScenePreviews[i];
+                if (entry.renderer == null || !desiredKeys.Contains(MakeSlotKey(entry.renderer, entry.submeshIndex)))
+                {
+                    RestoreEntry(entry);
+                    activeScenePreviews.RemoveAt(i);
+                }
+            }
+
+            SceneView.RepaintAll();
+        }
+
+        public void ClearScenePreview()
+        {
+            if (activeScenePreviews.Count == 0)
+            {
+                return;
+            }
+
+            for (int i = activeScenePreviews.Count - 1; i >= 0; i--)
+            {
+                RestoreEntry(activeScenePreviews[i]);
+            }
+            activeScenePreviews.Clear();
+            SceneView.RepaintAll();
+        }
+
+        public void DetachScenePreviewWithoutRestore()
+        {
+            for (int i = 0; i < activeScenePreviews.Count; i++)
+            {
+                if (activeScenePreviews[i].transientMaterial != null)
+                {
+                    UnityEngine.Object.DestroyImmediate(activeScenePreviews[i].transientMaterial);
+                }
+            }
+            activeScenePreviews.Clear();
+        }
+
+        private static Material ResolveSourceMaterial(
+            HairMaterialTarget target,
+            HairGlossBackupStore backupStore,
+            ScenePreviewEntry existing)
+        {
+            if (backupStore != null &&
+                backupStore.TryGetRecord(target.renderer, target.submeshIndex, out RendererMaterialRecord rec) &&
+                rec.originalMaterial != null)
+            {
+                return rec.originalMaterial;
+            }
+
+            if (existing != null && existing.restoreMaterial != null)
+            {
+                return existing.restoreMaterial;
+            }
+
+            return target.originalMaterial != null ? target.originalMaterial : target.currentMaterial;
+        }
+
+        private static void RestoreEntry(ScenePreviewEntry entry)
+        {
+            if (entry.renderer != null && entry.restoreMaterial != null)
+            {
+                Material[] mats = entry.renderer.sharedMaterials;
+                if (mats != null && entry.submeshIndex >= 0 && entry.submeshIndex < mats.Length)
+                {
+                    mats[entry.submeshIndex] = entry.restoreMaterial;
+                    entry.renderer.sharedMaterials = mats;
+                }
+            }
+
+            if (entry.transientMaterial != null)
+            {
+                UnityEngine.Object.DestroyImmediate(entry.transientMaterial);
+            }
+        }
+
+        private ScenePreviewEntry FindScenePreviewEntry(Renderer renderer, int submeshIndex)
+        {
+            for (int i = 0; i < activeScenePreviews.Count; i++)
+            {
+                if (activeScenePreviews[i].renderer == renderer && activeScenePreviews[i].submeshIndex == submeshIndex)
+                {
+                    return activeScenePreviews[i];
+                }
+            }
+            return null;
+        }
+
+        private static string MakeSlotKey(Renderer renderer, int submesh)
+        {
+            return $"{renderer.GetInstanceID()}:{submesh}";
+        }
+
+        private static HairMaterialTarget FindFirstSelectedLilToon(List<HairMaterialTarget> targets)
+        {
+            for (int i = 0; i < targets.Count; i++)
+            {
+                if (targets[i] != null && targets[i].isSelected && targets[i].isLilToon)
+                {
+                    return targets[i];
+                }
+            }
+            return targets.Count > 0 ? targets[0] : null;
+        }
+
+        private static Texture2D RenderSyntheticHairDome(
+            HairGlossSettings settings,
+            Color baseHairColor,
+            Texture2D normalMap,
+            Texture2D matCapTex)
+        {
+            const int size = PreviewResolution;
+            Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false, false);
+            Color[] pixels = new Color[size * size];
+
+            Color[] normalPixels = normalMap != null ? normalMap.GetPixels() : null;
+            int nw = normalMap != null ? normalMap.width : 0;
+            int nh = normalMap != null ? normalMap.height : 0;
+
+            Color[] matCapPixels = matCapTex != null ? matCapTex.GetPixels() : null;
+            int mw = matCapTex != null ? matCapTex.width : 0;
+            int mh = matCapTex != null ? matCapTex.height : 0;
+
+            Vector3 lightDir = new Vector3(-0.32f, 0.62f, 0.71f).normalized;
+            Vector3 viewDir = Vector3.forward;
+            Color bgTop = new Color(0.14f, 0.15f, 0.18f, 1f);
+            Color bgBottom = new Color(0.09f, 0.10f, 0.12f, 1f);
+
+            // Ensure base hair has visible saturation/brightness in preview even if white material
+            Color hairAlbedo = baseHairColor;
+            if (hairAlbedo.r > 0.96f && hairAlbedo.g > 0.96f && hairAlbedo.b > 0.96f)
+            {
+                hairAlbedo = new Color(0.36f, 0.27f, 0.25f, 1f);
+            }
+
+            float bumpAmp = settings.strandBumpScale * 0.45f;
+
+            for (int py = 0; py < size; py++)
+            {
+                float vCoord = (py + 0.5f) / size;
+                float sy = vCoord * 2f - 1f;
+                Color bgColor = Color.Lerp(bgBottom, bgTop, vCoord);
+                int row = py * size;
+
+                for (int px = 0; px < size; px++)
+                {
+                    float uCoord = (px + 0.5f) / size;
+                    float sx = uCoord * 2f - 1f;
+                    float r2 = sx * sx + sy * sy;
+
+                    if (r2 > 0.92f * 0.92f)
+                    {
+                        pixels[row + px] = bgColor;
+                        continue;
+                    }
+
+                    // Normalize inside sphere radius 0.92
+                    float nx0 = sx / 0.92f;
+                    float ny0 = sy / 0.92f;
+                    float nz0 = Mathf.Sqrt(Mathf.Max(0f, 1f - nx0 * nx0 - ny0 * ny0));
+
+                    Vector3 normal = new Vector3(nx0, ny0, nz0);
+                    Vector3 tangent = new Vector3(nz0, 0f, -nx0).normalized;
+                    Vector3 bitangent = Vector3.Cross(normal, tangent).normalized;
+
+                    // Sample flow normal map using spherical mapping
+                    float u = 0.5f + Mathf.Atan2(nx0, nz0) / Mathf.PI * 0.65f;
+                    float v = 0.5f + Mathf.Asin(Mathf.Clamp(ny0, -1f, 1f)) / Mathf.PI;
+
+                    if (normalPixels != null && nw > 0 && nh > 0)
+                    {
+                        int ix = Mathf.Clamp(Mathf.FloorToInt(u * nw), 0, nw - 1);
+                        int iy = Mathf.Clamp(Mathf.FloorToInt(v * nh), 0, nh - 1);
+                        Color nc = normalPixels[iy * nw + ix];
+                        float tx = (nc.r * 2f - 1f) * bumpAmp;
+                        float ty = (nc.g * 2f - 1f) * bumpAmp;
+                        normal = (normal + tangent * tx + bitangent * ty).normalized;
+                    }
+
+                    // Toon shading base
+                    float ndl = Vector3.Dot(normal, lightDir);
+                    float shadowFactor = Mathf.SmoothStep(-0.15f, 0.25f, ndl);
+                    Color shadedBase = Color.Lerp(hairAlbedo * 0.52f, hairAlbedo, shadowFactor);
+
+                    // Procedural strand variation on base hair
+                    float strandShade = 0.92f + 0.08f * Mathf.Sin(u * 160f);
+                    shadedBase *= strandShade;
+
+                    // MatCap lookup
+                    Color matCapSample = Color.black;
+                    if (matCapPixels != null && mw > 0 && mh > 0)
+                    {
+                        float mu = Mathf.Clamp01(normal.x * 0.5f + 0.5f);
+                        float mv = Mathf.Clamp01(normal.y * 0.5f + 0.5f);
+                        int mx = Mathf.Clamp(Mathf.FloorToInt(mu * mw), 0, mw - 1);
+                        int my = Mathf.Clamp(Mathf.FloorToInt(mv * mh), 0, mh - 1);
+                        matCapSample = matCapPixels[my * mw + mx];
+                    }
+
+                    // Shadow mask attenuation
+                    float matCapMask = Mathf.Lerp(1f, shadowFactor, settings.shadowMaskStrength);
+                    float rootTip = Mathf.Clamp01(1f - v);
+                    float rtMask = (settings.rootFalloff > 0.001f
+                                       ? Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(rootTip / settings.rootFalloff))
+                                       : 1f)
+                                   * (settings.tipFalloff > 0.001f
+                                       ? Mathf.SmoothStep(0f, 1f, Mathf.Clamp01((1f - rootTip) / settings.tipFalloff))
+                                       : 1f);
+
+                    Color mcTerm = matCapSample * (matCapMask * rtMask * settings.glossIntensity);
+
+                    Color combined = shadedBase;
+                    switch (settings.matCapBlendMode)
+                    {
+                        case 0: // Normal
+                            combined = Color.Lerp(shadedBase, mcTerm, Mathf.Clamp01(mcTerm.maxColorComponent));
+                            break;
+                        case 1: // Add
+                            combined = shadedBase + mcTerm;
+                            break;
+                        case 2: // Screen
+                            combined = new Color(
+                                1f - (1f - shadedBase.r) * (1f - Mathf.Clamp01(mcTerm.r)),
+                                1f - (1f - shadedBase.g) * (1f - Mathf.Clamp01(mcTerm.g)),
+                                1f - (1f - shadedBase.b) * (1f - Mathf.Clamp01(mcTerm.b)),
+                                1f);
+                            break;
+                        case 3: // Multiply
+                            combined = shadedBase * mcTerm;
+                            break;
+                    }
+
+                    // Kajiya-Kay anisotropic highlight approximation
+                    if (settings.enableAnisotropy)
+                    {
+                        Vector3 halfVec = (lightDir + viewDir).normalized;
+                        Vector3 shiftedBitangent = (bitangent + normal * (settings.anisotropyShift * 0.45f)).normalized;
+                        float dotBH = Vector3.Dot(shiftedBitangent, halfVec);
+                        float sinBH = Mathf.Sqrt(Mathf.Max(0f, 1f - dotBH * dotBH));
+                        float exp = Mathf.Lerp(14f, 95f, settings.smoothness) / Mathf.Max(0.25f, settings.highlightWidth * 2f);
+                        float anisoSpec = Mathf.Pow(sinBH, exp) * settings.glossIntensity * 0.38f * rtMask * shadowFactor;
+                        combined += settings.glossColor * anisoSpec;
+                    }
+
+                    // Anti-aliased outer sphere edge
+                    float r = Mathf.Sqrt(r2);
+                    float alphaEdge = Mathf.SmoothStep(0.92f, 0.89f, r);
+                    pixels[row + px] = Color.Lerp(bgColor, new Color(
+                        Mathf.Clamp01(combined.r),
+                        Mathf.Clamp01(combined.g),
+                        Mathf.Clamp01(combined.b),
+                        1f), alphaEdge);
+                }
+            }
+
+            tex.SetPixels(pixels);
+            tex.Apply(false, false);
+            return tex;
+        }
+
+        private void DestroyPreviewTextures()
+        {
+            if (normalPreviewTex != null) UnityEngine.Object.DestroyImmediate(normalPreviewTex);
+            if (matCapPreviewTex != null) UnityEngine.Object.DestroyImmediate(matCapPreviewTex);
+            if (maskPreviewTex != null) UnityEngine.Object.DestroyImmediate(maskPreviewTex);
+            if (domePreviewTex != null) UnityEngine.Object.DestroyImmediate(domePreviewTex);
+            normalPreviewTex = null;
+            matCapPreviewTex = null;
+            maskPreviewTex = null;
+            domePreviewTex = null;
+        }
+    }
+}

@@ -1,0 +1,22 @@
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE and build artifacts
+.vs/
+.idea/
+*.csproj
+*.sln
+*.user
+*.suo
+*.tmp
+
+# Unity project folders (in case opened inside a test project)
+Library/
+Temp/
+Obj/
+Build/
+Builds/
+Logs/
+UserSettings/

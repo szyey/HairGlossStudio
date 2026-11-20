@@ -1,0 +1,19 @@
+{
+  "name": "com.nextg.hair-gloss-studio",
+  "displayName": "Hair Gloss Studio",
+  "version": "1.0.0",
+  "unity": "2022.3",
+  "description": "lilToonの髪マテリアルに対して毛流れを自動解析し、毛束に沿った立体的なツヤ・天使の輪を非破壊で追加するUnityエディタ拡張ツール",
+  "keywords": [
+    "unity",
+    "vrchat",
+    "liltoon",
+    "hair",
+    "gloss",
+    "matcap",
+    "anisotropy"
+  ],
+  "author": {
+    "name": "szyey"
+  }
+}
