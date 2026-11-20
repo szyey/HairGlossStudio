@@ -402,6 +402,7 @@ namespace HairGlossStudio.Editor
                 if (!Mathf.Approximately(nextWidth, settings.highlightWidth))
                 {
                     settings.highlightWidth = nextWidth;
+                    settings.anisotropyBitangentWidth = Mathf.Lerp(0.05f, 0.5f, nextWidth);
                     settings.widthPreset = GlossWidthPreset.Custom;
                 }
 
@@ -512,6 +513,7 @@ namespace HairGlossStudio.Editor
                         using (new EditorGUI.DisabledGroupScope(!settings.enableAnisotropy))
                         {
                             settings.anisotropyTangentWidth = EditorGUILayout.Slider("接線方向の幅 (Tangent)", settings.anisotropyTangentWidth, 0.05f, 2f);
+                            settings.anisotropyBitangentWidth = EditorGUILayout.Slider("従法線方向の幅 (Bitangent)", settings.anisotropyBitangentWidth, 0.02f, 1f);
                             settings.anisotropyShift = EditorGUILayout.Slider("ハイライト位置オフセット", settings.anisotropyShift, -1f, 1f);
                             settings.anisotropyShiftNoiseScale = EditorGUILayout.Slider("位置ノイズ強度", settings.anisotropyShiftNoiseScale, 0f, 1f);
                             settings.anisotropySpecularStrength = EditorGUILayout.Slider("異方性 光沢強度", settings.anisotropySpecularStrength, 0f, 2f);

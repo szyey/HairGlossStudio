@@ -46,7 +46,7 @@ namespace HairGlossStudio.Editor
             SetFloatSafe(mat, "_AnisotropyScale", Mathf.Clamp01(settings.glossIntensity));
             SetTextureSafe(mat, "_AnisotropyScaleMask", maskTex);
             SetFloatSafe(mat, "_AnisotropyTangentWidth", settings.anisotropyTangentWidth);
-            SetFloatSafe(mat, "_AnisotropyBitangentWidth", Mathf.Lerp(0.05f, 0.5f, settings.highlightWidth));
+            SetFloatSafe(mat, "_AnisotropyBitangentWidth", settings.anisotropyBitangentWidth);
             SetFloatSafe(mat, "_AnisotropyShift", settings.anisotropyShift);
             SetFloatSafe(mat, "_AnisotropyShiftNoiseScale", settings.anisotropyShiftNoiseScale);
             SetFloatSafe(mat, "_AnisotropySpecularStrength", settings.anisotropySpecularStrength);
@@ -177,39 +177,37 @@ namespace HairGlossStudio.Editor
         {
             try
             {
+                string[] candidateMethods = { "CheckShaderType", "SetupMaterialWithQueue", "MaterialOptimize" };
+                Type[] matArgTypes = { typeof(Material) };
+                object[] args = { mat };
+
                 Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
                 for (int i = 0; i < assemblies.Length; i++)
                 {
                     Assembly asm = assemblies[i];
-                    Type matUtilsType = asm.GetType("lilToon.lilMaterialUtils") ?? asm.GetType("lilMaterialUtils");
-                    if (matUtilsType != null)
+                    Type[] candidateTypes =
                     {
-                        MethodInfo setupMethod = matUtilsType.GetMethod(
-                            "SetupMaterialWithRenderingMode",
-                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
-                            null,
-                            new[] { typeof(Material) },
-                            null);
-                        if (setupMethod != null)
-                        {
-                            setupMethod.Invoke(null, new object[] { mat });
-                            return;
-                        }
-                    }
+                        asm.GetType("lilToon.lilMaterialUtils") ?? asm.GetType("lilMaterialUtils"),
+                        asm.GetType("lilToon.lilToonInspector") ?? asm.GetType("lilToonInspector")
+                    };
 
-                    Type inspectorType = asm.GetType("lilToon.lilToonInspector") ?? asm.GetType("lilToonInspector");
-                    if (inspectorType != null)
+                    for (int t = 0; t < candidateTypes.Length; t++)
                     {
-                        MethodInfo optimizeMethod = inspectorType.GetMethod(
-                            "MaterialOptimize",
-                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
-                            null,
-                            new[] { typeof(Material) },
-                            null);
-                        if (optimizeMethod != null)
+                        Type type = candidateTypes[t];
+                        if (type == null) continue;
+
+                        for (int m = 0; m < candidateMethods.Length; m++)
                         {
-                            optimizeMethod.Invoke(null, new object[] { mat });
-                            return;
+                            MethodInfo method = type.GetMethod(
+                                candidateMethods[m],
+                                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                                null,
+                                matArgTypes,
+                                null);
+                            if (method != null)
+                            {
+                                method.Invoke(null, args);
+                            }
                         }
                     }
                 }

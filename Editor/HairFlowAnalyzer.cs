@@ -181,13 +181,34 @@ namespace HairGlossStudio.Editor
                 return false;
             }
 
+            int vertexCount = vertices.Length;
+            int[] parent = new int[vertexCount];
+            float[] compMinY = new float[vertexCount];
+            float[] compMaxY = new float[vertexCount];
+            for (int i = 0; i < vertexCount; i++)
+            {
+                parent[i] = i;
+                compMinY[i] = float.MaxValue;
+                compMaxY[i] = float.MinValue;
+            }
+
+            for (int t = 0; t + 2 < indices.Length; t += 3)
+            {
+                UnionVertices(parent, indices[t], indices[t + 1]);
+                UnionVertices(parent, indices[t + 1], indices[t + 2]);
+            }
+
             float minY = float.MaxValue;
             float maxY = float.MinValue;
             for (int i = 0; i < indices.Length; i++)
             {
-                float y = vertices[indices[i]].y;
+                int vIdx = indices[i];
+                int root = FindRoot(parent, vIdx);
+                float y = vertices[vIdx].y;
                 if (y < minY) minY = y;
                 if (y > maxY) maxY = y;
+                if (y < compMinY[root]) compMinY[root] = y;
+                if (y > compMaxY[root]) compMaxY[root] = y;
             }
 
             float yRange = Mathf.Max(1e-5f, maxY - minY);
@@ -240,9 +261,9 @@ namespace HairGlossStudio.Editor
                     triFlow = new Vector2(0f, -1f);
                 }
 
-                float rt0 = 1f - Mathf.Clamp01((y0 - minY) / yRange);
-                float rt1 = 1f - Mathf.Clamp01((y1 - minY) / yRange);
-                float rt2 = 1f - Mathf.Clamp01((y2 - minY) / yRange);
+                float rt0 = ComputeVertexRootTip(i0, vertices, parent, compMinY, compMaxY, minY, yRange);
+                float rt1 = ComputeVertexRootTip(i1, vertices, parent, compMinY, compMaxY, minY, yRange);
+                float rt2 = ComputeVertexRootTip(i2, vertices, parent, compMinY, compMaxY, minY, yRange);
 
                 Vector2 p0 = uv0 * size;
                 Vector2 p1 = uv1 * size;
@@ -282,6 +303,44 @@ namespace HairGlossStudio.Editor
             }
 
             return anyTriangleRasterized;
+        }
+
+        private static int FindRoot(int[] parent, int x)
+        {
+            while (parent[x] != x)
+            {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            return x;
+        }
+
+        private static void UnionVertices(int[] parent, int a, int b)
+        {
+            int ra = FindRoot(parent, a);
+            int rb = FindRoot(parent, b);
+            if (ra != rb)
+            {
+                parent[rb] = ra;
+            }
+        }
+
+        private static float ComputeVertexRootTip(
+            int vertexIndex,
+            Vector3[] vertices,
+            int[] parent,
+            float[] compMinY,
+            float[] compMaxY,
+            float globalMinY,
+            float globalYRange)
+        {
+            int r = FindRoot(parent, vertexIndex);
+            float cRange = compMaxY[r] - compMinY[r];
+            if (cRange >= globalYRange * 0.08f)
+            {
+                return 1f - Mathf.Clamp01((vertices[vertexIndex].y - compMinY[r]) / cRange);
+            }
+            return 1f - Mathf.Clamp01((vertices[vertexIndex].y - globalMinY) / globalYRange);
         }
 
         private static float EdgeFunction(Vector2 a, Vector2 b, Vector2 c)
