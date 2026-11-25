@@ -22,7 +22,8 @@ namespace HairGlossStudio.Editor
             HairGlossSettings settings,
             Texture2D flowNormal,
             Texture2D matCapTex,
-            Texture2D maskTex)
+            Texture2D maskTex,
+            Texture2D tangentMap)
         {
             if (mat == null || settings == null)
             {
@@ -42,7 +43,7 @@ namespace HairGlossStudio.Editor
 
             // 2. Anisotropy Configuration
             SetFloatSafe(mat, "_UseAnisotropy", settings.enableAnisotropy ? 1f : 0f);
-            SetTextureSafe(mat, "_AnisotropyTangentMap", flowNormal);
+            SetTextureSafe(mat, "_AnisotropyTangentMap", tangentMap);
             SetFloatSafe(mat, "_AnisotropyScale", Mathf.Clamp01(settings.glossIntensity));
             SetTextureSafe(mat, "_AnisotropyScaleMask", maskTex);
             SetFloatSafe(mat, "_AnisotropyTangentWidth", settings.anisotropyTangentWidth);

@@ -689,6 +689,13 @@ namespace HairGlossStudio.Editor
                 return;
             }
 
+            if (!HairTextureGenerator.TryNormalizeOutputFolder(settings.outputFolder, out string rootFolder, out string folderError))
+            {
+                statusMessage = folderError;
+                statusMessageType = MessageType.Error;
+                return;
+            }
+
             // Clear transient preview before touching real materials
             previewRenderer.ClearScenePreview();
             liveScenePreview = false;
@@ -720,15 +727,20 @@ namespace HairGlossStudio.Editor
                 }
             }
 
-            string rootFolder = string.IsNullOrWhiteSpace(settings.outputFolder)
-                ? "Assets/HairGlossStudio_Generated"
-                : settings.outputFolder.Replace('\\', '/').TrimEnd('/');
-
             string avatarFolderName = HairTextureGenerator.SanitizeFileName(targetRoot.name);
             string targetOutputFolder = $"{rootFolder}/{avatarFolderName}";
-            HairTextureGenerator.EnsureFolderExists(targetOutputFolder);
-
-            HairGlossBackupStore defaultStore = HairGlossBackupStore.LoadOrCreate();
+            HairGlossBackupStore defaultStore;
+            try
+            {
+                HairTextureGenerator.EnsureFolderExists(targetOutputFolder);
+                defaultStore = HairGlossBackupStore.LoadOrCreate();
+            }
+            catch (Exception exception) when (exception is ArgumentException || exception is IOException || exception is UnauthorizedAccessException)
+            {
+                statusMessage = exception.Message;
+                statusMessageType = MessageType.Error;
+                return;
+            }
             int appliedCount = 0;
             Undo.IncrementCurrentGroup();
             int undoGroup = Undo.GetCurrentGroup();
@@ -772,25 +784,31 @@ namespace HairGlossStudio.Editor
                         analysis.averageBaseColor.b * baseColor.b,
                         1f);
 
-                    Texture2D rawNormal = HairTextureGenerator.GenerateFlowNormalMap(analysis, settings);
-                    Texture2D rawMatCap = HairTextureGenerator.GenerateGlossMatCap(settings, avgBase);
-                    Texture2D rawMask = HairTextureGenerator.GenerateGlossMask(analysis, settings);
-
                     string baseAssetName = $"{originalMat.name}_{target.renderer.name}_S{target.submeshIndex}";
                     bool ownsAssets = store.OwnsGeneratedAssets(target.renderer, target.submeshIndex);
                     store.TryGetRecord(target.renderer, target.submeshIndex, out RendererMaterialRecord existingRecord);
-                    HairTextureGenerator.SavedTextureSet savedTextures = HairTextureGenerator.SaveTexturesAsAssets(
-                        targetOutputFolder,
-                        baseAssetName,
-                        rawNormal,
-                        rawMatCap,
-                        rawMask,
-                        settings,
-                        ownsAssets ? existingRecord.generatedTexturePaths : null);
-
-                    DestroyImmediate(rawNormal);
-                    DestroyImmediate(rawMatCap);
-                    DestroyImmediate(rawMask);
+                    Texture2D rawNormal = null;
+                    Texture2D rawMatCap = null;
+                    Texture2D rawMask = null;
+                    Texture2D rawTangent = null;
+                    HairTextureGenerator.SavedTextureSet savedTextures;
+                    try
+                    {
+                        rawNormal = HairTextureGenerator.GenerateFlowNormalMap(analysis, settings);
+                        rawMatCap = HairTextureGenerator.GenerateGlossMatCap(settings, avgBase);
+                        rawMask = HairTextureGenerator.GenerateGlossMask(analysis, settings);
+                        rawTangent = HairTextureGenerator.GenerateAnisotropyTangentMap(analysis);
+                        savedTextures = HairTextureGenerator.SaveTexturesAsAssets(
+                            targetOutputFolder, baseAssetName, rawNormal, rawMatCap, rawMask, rawTangent,
+                            settings, ownsAssets ? existingRecord.generatedTexturePaths : null);
+                    }
+                    finally
+                    {
+                        if (rawNormal != null) DestroyImmediate(rawNormal);
+                        if (rawMatCap != null) DestroyImmediate(rawMatCap);
+                        if (rawMask != null) DestroyImmediate(rawMask);
+                        if (rawTangent != null) DestroyImmediate(rawTangent);
+                    }
 
                     string matAssetPath = ownsAssets ? AssetDatabase.GetAssetPath(existingRecord.generatedMaterial) : AssetDatabase.GenerateUniqueAssetPath(Path.Combine(
                         targetOutputFolder,
@@ -813,7 +831,8 @@ namespace HairGlossStudio.Editor
                         settings,
                         savedTextures.normalMap,
                         savedTextures.matCap,
-                        savedTextures.mask);
+                        savedTextures.mask,
+                        savedTextures.tangentMap);
 
                     Material[] sharedMats = target.renderer.sharedMaterials;
                     if (sharedMats != null && target.submeshIndex >= 0 && target.submeshIndex < sharedMats.Length)
@@ -833,7 +852,8 @@ namespace HairGlossStudio.Editor
                             {
                                 savedTextures.normalMapPath,
                                 savedTextures.matCapPath,
-                                savedTextures.maskPath
+                                savedTextures.maskPath,
+                                savedTextures.tangentMapPath
                             });
 
                         target.originalMaterial = originalMat;

@@ -154,13 +154,14 @@ namespace HairGlossStudio.Editor.Tests
             {
                 var settings = new HairGlossSettings { textureResolution = 32 };
                 HairTextureGenerator.SavedTextureSet first = HairTextureGenerator.SaveTexturesAsAssets(
-                    folder, "Hair", texture, texture, texture, settings);
+                    folder, "Hair", texture, texture, texture, texture, settings);
                 string originalGuid = AssetDatabase.AssetPathToGUID(first.normalMapPath);
                 HairTextureGenerator.SavedTextureSet second = HairTextureGenerator.SaveTexturesAsAssets(
-                    folder, "Hair", texture, texture, texture, settings);
+                    folder, "Hair", texture, texture, texture, texture, settings);
                 Assert.AreNotEqual(first.normalMapPath, second.normalMapPath);
                 Assert.AreNotEqual(first.matCapPath, second.matCapPath);
                 Assert.AreNotEqual(first.maskPath, second.maskPath);
+                Assert.AreNotEqual(first.tangentMapPath, second.tangentMapPath);
                 Assert.AreEqual(originalGuid, AssetDatabase.AssetPathToGUID(first.normalMapPath));
             }
             finally { UnityEngine.Object.DestroyImmediate(texture); }
@@ -170,7 +171,7 @@ namespace HairGlossStudio.Editor.Tests
         public void OwnershipRejectsReplacedTextureGuid()
         {
             Renderer renderer = root.AddComponent<MeshRenderer>();
-            string[] paths = new string[3];
+            string[] paths = new string[4];
             for (int i = 0; i < paths.Length; i++)
             {
                 paths[i] = $"{folder}/Texture{i}.asset";

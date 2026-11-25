@@ -127,27 +127,25 @@ namespace HairGlossStudio.Editor
                 return fallback;
             }
 
-            RenderTexture rt = RenderTexture.GetTemporary(
-                targetWidth,
-                targetHeight,
-                0,
-                RenderTextureFormat.ARGB32,
-                RenderTextureReadWrite.sRGB);
-
             RenderTexture prev = RenderTexture.active;
-            Graphics.Blit(source, rt);
-            RenderTexture.active = rt;
-
-            Texture2D readable = new Texture2D(targetWidth, targetHeight, TextureFormat.RGBA32, false, false);
-            readable.ReadPixels(new Rect(0, 0, targetWidth, targetHeight), 0, 0);
-            readable.Apply(false, false);
-
-            RenderTexture.active = prev;
-            RenderTexture.ReleaseTemporary(rt);
-
-            Color[] pixels = readable.GetPixels();
-            UnityEngine.Object.DestroyImmediate(readable);
-            return pixels;
+            RenderTexture rt = null;
+            Texture2D readable = null;
+            try
+            {
+                rt = RenderTexture.GetTemporary(targetWidth, targetHeight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+                Graphics.Blit(source, rt);
+                RenderTexture.active = rt;
+                readable = new Texture2D(targetWidth, targetHeight, TextureFormat.RGBA32, false, false);
+                readable.ReadPixels(new Rect(0, 0, targetWidth, targetHeight), 0, 0);
+                readable.Apply(false, false);
+                return readable.GetPixels();
+            }
+            finally
+            {
+                RenderTexture.active = prev;
+                if (rt != null) RenderTexture.ReleaseTemporary(rt);
+                if (readable != null) UnityEngine.Object.DestroyImmediate(readable);
+            }
         }
 
         private static bool RasterizeMeshFlow(

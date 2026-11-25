@@ -16,9 +16,45 @@ namespace HairGlossStudio.Editor
             public Texture2D normalMap;
             public Texture2D matCap;
             public Texture2D mask;
+            public Texture2D tangentMap;
             public string normalMapPath;
             public string matCapPath;
             public string maskPath;
+            public string tangentMapPath;
+        }
+
+        public static Texture2D GenerateAnisotropyTangentMap(HairFlowAnalyzer.AnalysisResult analysis)
+        {
+            if (analysis == null || analysis.width <= 0 || analysis.height <= 0 ||
+                analysis.flowField == null || analysis.flowField.Length != analysis.width * analysis.height)
+                throw new ArgumentException("A complete hair flow field is required.", nameof(analysis));
+
+            Color[] pixels = new Color[analysis.flowField.Length];
+            for (int i = 0; i < pixels.Length; i++)
+            {
+                Vector2 flow = analysis.flowField[i];
+                flow = flow.sqrMagnitude > 1e-6f ? flow.normalized : Vector2.down;
+                pixels[i] = new Color(flow.x * 0.5f + 0.5f, flow.y * 0.5f + 0.5f, 0.5f, 1f);
+            }
+            return CreateTexture(analysis.width, analysis.height, pixels, true, "HairAnisotropyTangent", TextureWrapMode.Repeat);
+        }
+
+        private static Texture2D CreateTexture(int width, int height, Color[] pixels, bool linear, string name, TextureWrapMode wrapMode)
+        {
+            Texture2D texture = new Texture2D(width, height, TextureFormat.RGBA32, true, linear);
+            try
+            {
+                texture.name = name;
+                texture.wrapMode = wrapMode;
+                texture.SetPixels(pixels);
+                texture.Apply(true, false);
+                return texture;
+            }
+            catch
+            {
+                UnityEngine.Object.DestroyImmediate(texture);
+                throw;
+            }
         }
 
         public static Texture2D GenerateFlowNormalMap(
@@ -29,10 +65,6 @@ namespace HairGlossStudio.Editor
             int h = analysis.height;
             int count = w * h;
 
-            Texture2D tex = new Texture2D(w, h, TextureFormat.RGBA32, true, true);
-            tex.name = "HairFlowNormal_Preview";
-            tex.wrapMode = TextureWrapMode.Repeat;
-
             Color[] pixels = new Color[count];
             if (settings.strandBumpScale <= 0.001f)
             {
@@ -41,9 +73,7 @@ namespace HairGlossStudio.Editor
                 {
                     pixels[i] = flatNormal;
                 }
-                tex.SetPixels(pixels);
-                tex.Apply(true, false);
-                return tex;
+                return CreateTexture(w, h, pixels, true, "HairFlowNormal_Preview", TextureWrapMode.Repeat);
             }
 
             // Build deterministic multi-octave noise buffer
@@ -154,9 +184,7 @@ namespace HairGlossStudio.Editor
                 }
             }
 
-            tex.SetPixels(pixels);
-            tex.Apply(true, false);
-            return tex;
+            return CreateTexture(w, h, pixels, true, "HairFlowNormal_Preview", TextureWrapMode.Repeat);
         }
 
         public static Texture2D GenerateGlossMatCap(
@@ -167,10 +195,6 @@ namespace HairGlossStudio.Editor
             int size = overrideSize > 0
                 ? Mathf.Clamp(overrideSize, 128, 1024)
                 : Mathf.Clamp(settings.textureResolution, 256, 1024);
-
-            Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, true, false);
-            tex.name = "HairGlossMatCap_Preview";
-            tex.wrapMode = TextureWrapMode.Clamp;
 
             Color tint = Color.Lerp(
                 settings.glossColor,
@@ -255,9 +279,7 @@ namespace HairGlossStudio.Editor
                 }
             }
 
-            tex.SetPixels(pixels);
-            tex.Apply(true, false);
-            return tex;
+            return CreateTexture(size, size, pixels, false, "HairGlossMatCap_Preview", TextureWrapMode.Clamp);
         }
 
         public static Texture2D GenerateGlossMask(
@@ -267,10 +289,6 @@ namespace HairGlossStudio.Editor
             int w = analysis.width;
             int h = analysis.height;
             int count = w * h;
-
-            Texture2D tex = new Texture2D(w, h, TextureFormat.RGBA32, true, true);
-            tex.name = "HairGlossMask_Preview";
-            tex.wrapMode = TextureWrapMode.Clamp;
 
             Color[] pixels = new Color[count];
             for (int i = 0; i < count; i++)
@@ -290,9 +308,7 @@ namespace HairGlossStudio.Editor
                 pixels[i] = new Color(val, val, val, 1f);
             }
 
-            tex.SetPixels(pixels);
-            tex.Apply(true, false);
-            return tex;
+            return CreateTexture(w, h, pixels, true, "HairGlossMask_Preview", TextureWrapMode.Clamp);
         }
 
         public static SavedTextureSet SaveTexturesAsAssets(
@@ -301,9 +317,23 @@ namespace HairGlossStudio.Editor
             Texture2D normalMap,
             Texture2D matCap,
             Texture2D mask,
+            Texture2D tangentMap,
             HairGlossSettings settings,
             string[] ownedTexturePaths = null)
         {
+            if (!TryNormalizeOutputFolder(outputFolder, out string normalizedFolder, out string error))
+                throw new ArgumentException(error, nameof(outputFolder));
+            outputFolder = normalizedFolder;
+            if (ownedTexturePaths != null && ownedTexturePaths.Length != 4)
+                throw new ArgumentException("Four owned texture paths are required.", nameof(ownedTexturePaths));
+            if (ownedTexturePaths != null)
+            {
+                foreach (string path in ownedTexturePaths)
+                {
+                    if (string.IsNullOrEmpty(path) || !TryNormalizeOutputFolder(Path.GetDirectoryName(path), out _, out error))
+                        throw new ArgumentException("Owned textures must be under Assets/.", nameof(ownedTexturePaths));
+                }
+            }
             EnsureFolderExists(outputFolder);
             string safeBase = SanitizeFileName(baseName);
 
@@ -313,14 +343,19 @@ namespace HairGlossStudio.Editor
                 : AssetDatabase.GenerateUniqueAssetPath(Path.Combine(outputFolder, $"{safeBase}_GlossMatCap.png").Replace('\\', '/'));
             string maskPath = ownedTexturePaths != null ? ownedTexturePaths[2]
                 : AssetDatabase.GenerateUniqueAssetPath(Path.Combine(outputFolder, $"{safeBase}_GlossMask.png").Replace('\\', '/'));
+            string tangentPath = ownedTexturePaths != null ? ownedTexturePaths[3]
+                : AssetDatabase.GenerateUniqueAssetPath(Path.Combine(outputFolder, $"{safeBase}_AnisotropyTangent.png").Replace('\\', '/'));
 
             File.WriteAllBytes(normalPath, normalMap.EncodeToPNG());
             File.WriteAllBytes(matCapPath, matCap.EncodeToPNG());
             File.WriteAllBytes(maskPath, mask.EncodeToPNG());
+            File.WriteAllBytes(tangentPath, tangentMap.EncodeToPNG());
 
             AssetDatabase.ImportAsset(normalPath, ImportAssetOptions.ForceUpdate);
             AssetDatabase.ImportAsset(matCapPath, ImportAssetOptions.ForceUpdate);
             AssetDatabase.ImportAsset(maskPath, ImportAssetOptions.ForceUpdate);
+            AssetDatabase.ImportAsset(tangentPath, ImportAssetOptions.ForceUpdate);
+            ConfigureTextureImporter(tangentPath, TextureImporterType.NormalMap, false, TextureWrapMode.Repeat, settings.textureResolution);
 
             ConfigureTextureImporter(
                 normalPath,
@@ -348,15 +383,30 @@ namespace HairGlossStudio.Editor
                 normalMap = AssetDatabase.LoadAssetAtPath<Texture2D>(normalPath),
                 matCap = AssetDatabase.LoadAssetAtPath<Texture2D>(matCapPath),
                 mask = AssetDatabase.LoadAssetAtPath<Texture2D>(maskPath),
+                tangentMap = AssetDatabase.LoadAssetAtPath<Texture2D>(tangentPath),
                 normalMapPath = normalPath,
                 matCapPath = matCapPath,
-                maskPath = maskPath
+                maskPath = maskPath,
+                tangentMapPath = tangentPath
             };
+        }
+
+        public static Texture2D ImportPreviewNormal(string path, Texture2D texture)
+        {
+            if (string.IsNullOrEmpty(path) || !TryNormalizeOutputFolder(Path.GetDirectoryName(path), out _, out string error))
+                throw new ArgumentException("Preview normals must be under Assets/.", nameof(path));
+            File.WriteAllBytes(path, texture.EncodeToPNG());
+            AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
+            ConfigureTextureImporter(path, TextureImporterType.NormalMap, false, TextureWrapMode.Repeat, texture.width);
+            Texture2D imported = AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+            if (imported == null) throw new InvalidOperationException($"Could not import preview normal: {path}");
+            return imported;
         }
 
         public static void EnsureFolderExists(string assetFolderPath)
         {
-            string normalized = assetFolderPath.Replace('\\', '/').TrimEnd('/');
+            if (!TryNormalizeOutputFolder(assetFolderPath, out string normalized, out string error))
+                throw new ArgumentException(error, nameof(assetFolderPath));
             if (AssetDatabase.IsValidFolder(normalized))
             {
                 return;
@@ -369,10 +419,40 @@ namespace HairGlossStudio.Editor
                 string next = $"{current}/{parts[i]}";
                 if (!AssetDatabase.IsValidFolder(next))
                 {
-                    AssetDatabase.CreateFolder(current, parts[i]);
+                    string guid = AssetDatabase.CreateFolder(current, parts[i]);
+                    if (string.IsNullOrEmpty(guid) || !AssetDatabase.IsValidFolder(next))
+                        throw new IOException($"Could not create asset folder: {next}");
                 }
                 current = next;
             }
+        }
+
+        public static bool TryNormalizeOutputFolder(string input, out string normalized, out string error)
+        {
+            normalized = null;
+            error = "Output folder must be a relative folder strictly under Assets/, without '.' or '..'.";
+            if (string.IsNullOrWhiteSpace(input) || Path.IsPathRooted(input) || input.StartsWith("\\", StringComparison.Ordinal)) return false;
+            string[] parts = input.Replace('\\', '/').Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2 || parts[0] != "Assets") return false;
+            foreach (string part in parts)
+            {
+                if (part == "." || part == ".." || part != part.Trim() || part.EndsWith(".", StringComparison.Ordinal) ||
+                    part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+                    part.IndexOfAny(new[] { '<', '>', ':', '"', '|', '?', '*' }) >= 0) return false;
+                foreach (char c in part) if (char.IsControl(c)) return false;
+            }
+            try
+            {
+                string assets = Path.GetFullPath(Application.dataPath).TrimEnd(Path.DirectorySeparatorChar);
+                string path = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(assets), string.Join("/", parts)));
+                if (!path.StartsWith(assets + Path.DirectorySeparatorChar, StringComparison.Ordinal)) return false;
+            }
+            catch (ArgumentException) { return false; }
+            catch (NotSupportedException) { return false; }
+            catch (PathTooLongException) { return false; }
+            normalized = string.Join("/", parts);
+            error = null;
+            return true;
         }
 
         public static string SanitizeFileName(string raw)
@@ -405,6 +485,7 @@ namespace HairGlossStudio.Editor
             }
 
             importer.textureType = type;
+            if (type == TextureImporterType.NormalMap) importer.convertToNormalmap = false;
             importer.sRGBTexture = sRGB;
             importer.wrapMode = wrapMode;
             importer.maxTextureSize = maxSize;

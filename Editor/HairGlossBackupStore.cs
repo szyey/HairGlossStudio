@@ -75,15 +75,15 @@ namespace HairGlossStudio.Editor
         {
             if (!TryGetRecord(renderer, submeshIndex, out RendererMaterialRecord record) ||
                 record.generatedMaterial == null || string.IsNullOrEmpty(record.generatedMaterialGuid) ||
-                record.generatedTexturePaths == null || record.generatedTexturePaths.Length != 3 ||
-                record.generatedTextureGuids == null || record.generatedTextureGuids.Length != 3)
+                record.generatedTexturePaths == null || record.generatedTexturePaths.Length != 4 ||
+                record.generatedTextureGuids == null || record.generatedTextureGuids.Length != 4)
             {
                 return false;
             }
 
             if (AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(record.generatedMaterial)) != record.generatedMaterialGuid)
                 return false;
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < 4; i++)
             {
                 if (string.IsNullOrEmpty(record.generatedTextureGuids[i]) ||
                     AssetDatabase.AssetPathToGUID(record.generatedTexturePaths[i]) != record.generatedTextureGuids[i])
