@@ -136,6 +136,30 @@ namespace HairGlossStudio.Editor.Tests
             foreach (HairMaterialTarget target in targets) Assert.AreEqual(original, target.renderer.sharedMaterial);
         }
 
+        [Test]
+        public void ReapplyInNewFolderKeepsOldOutputsAndEarliestOriginal()
+        {
+            Apply((message, progress) => false);
+            HairGlossBackupStore store = AssetDatabase.LoadAssetAtPath<HairGlossBackupStore>(HairGlossBackupStore.DefaultStoreAssetPath);
+            Assert.IsTrue(store.TryGetRecord(targets[0].renderer, 0, out RendererMaterialRecord record));
+            Material oldMaterial = record.generatedMaterial;
+            string[] oldTextures = (string[])record.generatedTexturePaths.Clone();
+            var settings = (HairGlossSettings)GetField("settings");
+            settings.outputFolder = $"{folder}/Moved";
+            settings.glossColor = Color.red;
+            Apply((message, progress) => false);
+            string prefix = $"{settings.outputFolder}/{root.name}/";
+            Assert.IsTrue(store.TryGetRecord(targets[0].renderer, 0, out record));
+            Assert.AreEqual(original, record.originalMaterial);
+            Assert.AreNotEqual(oldMaterial, record.generatedMaterial);
+            Assert.IsNotNull(AssetDatabase.LoadAssetAtPath<Material>(AssetDatabase.GetAssetPath(oldMaterial)));
+            Assert.That(AssetDatabase.GetAssetPath(record.generatedMaterial), Does.StartWith(prefix));
+            foreach (string path in record.generatedTexturePaths) Assert.That(path, Does.StartWith(prefix));
+            foreach (string path in oldTextures) Assert.IsNotNull(AssetDatabase.LoadAssetAtPath<Texture2D>(path));
+            Assert.IsTrue(store.RestoreTarget(targets[0].renderer, 0));
+            Assert.AreEqual(original, targets[0].renderer.sharedMaterial);
+        }
+
         private void Apply(Func<string, float, bool> cancel)
         {
             typeof(HairGlossStudioWindow).GetMethod("ApplyGlossToSelectedTargets", BindingFlags.Instance | BindingFlags.NonPublic)

@@ -72,7 +72,7 @@ namespace HairGlossStudio.Editor
             return match;
         }
 
-        public bool OwnsGeneratedAssets(Renderer renderer, int submeshIndex)
+        public bool OwnsGeneratedAssets(Renderer renderer, int submeshIndex, string requiredOutputFolder = null)
         {
             if (!TryGetRecord(renderer, submeshIndex, out RendererMaterialRecord record) ||
                 record.generatedMaterial == null || string.IsNullOrEmpty(record.generatedMaterialGuid) ||
@@ -82,11 +82,21 @@ namespace HairGlossStudio.Editor
                 return false;
             }
 
-            if (AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(record.generatedMaterial)) != record.generatedMaterialGuid)
+            string folderPrefix = null;
+            if (requiredOutputFolder != null)
+            {
+                if (!HairTextureGenerator.TryNormalizeOutputFolder(requiredOutputFolder, out string folder, out _)) return false;
+                folderPrefix = folder + "/";
+            }
+            string materialPath = AssetDatabase.GetAssetPath(record.generatedMaterial);
+            if ((folderPrefix != null && !materialPath.StartsWith(folderPrefix, StringComparison.Ordinal)) ||
+                AssetDatabase.AssetPathToGUID(materialPath) != record.generatedMaterialGuid)
                 return false;
             for (int i = 0; i < 4; i++)
             {
                 if (string.IsNullOrEmpty(record.generatedTextureGuids[i]) ||
+                    (folderPrefix != null && (string.IsNullOrEmpty(record.generatedTexturePaths[i]) ||
+                        !record.generatedTexturePaths[i].StartsWith(folderPrefix, StringComparison.Ordinal))) ||
                     AssetDatabase.AssetPathToGUID(record.generatedTexturePaths[i]) != record.generatedTextureGuids[i])
                     return false;
             }

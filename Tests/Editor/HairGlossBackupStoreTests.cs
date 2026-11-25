@@ -270,5 +270,31 @@ namespace HairGlossStudio.Editor.Tests
             AssetDatabase.CreateAsset(new Texture2D(2, 2), paths[0]);
             Assert.IsFalse(store.OwnsGeneratedAssets(renderer, 0));
         }
+
+        [Test]
+        public void OwnershipReuseRequiresEveryAssetInsideRequestedFolder()
+        {
+            Renderer renderer = root.AddComponent<MeshRenderer>();
+            string currentFolder = $"{folder}/Current";
+            string otherFolder = $"{folder}/Other";
+            HairTextureGenerator.EnsureFolderExists(currentFolder);
+            HairTextureGenerator.EnsureFolderExists(otherFolder);
+            Assert.IsEmpty(AssetDatabase.MoveAsset(AssetDatabase.GetAssetPath(generated), $"{currentFolder}/Generated.mat"));
+            string[] paths = new string[4];
+            for (int i = 0; i < paths.Length; i++)
+            {
+                paths[i] = $"{currentFolder}/Texture{i}.asset";
+                AssetDatabase.CreateAsset(new Texture2D(2, 2), paths[i]);
+            }
+            store.RegisterBackup(renderer, 0, original, generated, paths);
+            Assert.IsTrue(store.OwnsGeneratedAssets(renderer, 0, currentFolder));
+            Assert.IsFalse(store.OwnsGeneratedAssets(renderer, 0, otherFolder));
+            Assert.IsFalse(store.OwnsGeneratedAssets(renderer, 0, currentFolder.Substring(0, currentFolder.Length - 1)));
+            Assert.IsFalse(store.OwnsGeneratedAssets(renderer, 0, string.Empty));
+            Assert.IsEmpty(AssetDatabase.MoveAsset(paths[0], $"{otherFolder}/Texture0.asset"));
+            paths[0] = $"{otherFolder}/Texture0.asset";
+            Assert.IsTrue(store.OwnsGeneratedAssets(renderer, 0));
+            Assert.IsFalse(store.OwnsGeneratedAssets(renderer, 0, currentFolder));
+        }
     }
 }

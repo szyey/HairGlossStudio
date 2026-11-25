@@ -788,7 +788,7 @@ namespace HairGlossStudio.Editor
                         1f);
 
                     string baseAssetName = $"{originalMat.name}_{target.renderer.name}_S{target.submeshIndex}";
-                    bool ownsAssets = store.OwnsGeneratedAssets(target.renderer, target.submeshIndex);
+                    bool ownsAssets = store.OwnsGeneratedAssets(target.renderer, target.submeshIndex, targetOutputFolder);
                     store.TryGetRecord(target.renderer, target.submeshIndex, out RendererMaterialRecord existingRecord);
                     Texture2D rawNormal = null;
                     Texture2D rawMatCap = null;
