@@ -59,7 +59,7 @@ namespace HairGlossStudio.Editor
             {
                 HairGlossBackupStore store = AssetDatabase.LoadAssetAtPath<HairGlossBackupStore>(AssetDatabase.GUIDToAssetPath(guid));
                 if (store == null) continue;
-                bool found = store.TryFindRecordIndex(GetGlobalIdString(renderer), GetHierarchyPath(renderer.transform), submeshIndex, out int index);
+                bool found = store.TryFindRecordIndex(GetGlobalIdString(renderer), GetHierarchyPath(renderer.transform), submeshIndex, out int index, GetLegacyHierarchyPath(renderer.transform));
                 if (index == -2 || (found && match != null))
                 {
                     ambiguous = true;
@@ -128,7 +128,7 @@ namespace HairGlossStudio.Editor
 
             string globalId = GetGlobalIdString(renderer);
             string hierarchyPath = GetHierarchyPath(renderer.transform);
-            bool hasExisting = TryFindRecordIndex(globalId, hierarchyPath, submeshIndex, out int existingIndex);
+            bool hasExisting = TryFindRecordIndex(globalId, hierarchyPath, submeshIndex, out int existingIndex, GetLegacyHierarchyPath(renderer.transform));
             if (existingIndex == -2) throw new InvalidOperationException("Multiple hair gloss backups match this target.");
             Undo.RecordObject(this, "Hair Gloss Studio Backup");
 
@@ -180,7 +180,7 @@ namespace HairGlossStudio.Editor
             string globalId = GetGlobalIdString(renderer);
             string hierarchyPath = GetHierarchyPath(renderer.transform);
 
-            if (TryFindRecordIndex(globalId, hierarchyPath, submeshIndex, out int index))
+            if (TryFindRecordIndex(globalId, hierarchyPath, submeshIndex, out int index, GetLegacyHierarchyPath(renderer.transform)))
             {
                 record = records[index];
                 if (record.rendererGlobalObjectId != globalId || record.rendererHierarchyPath != hierarchyPath)
@@ -251,7 +251,7 @@ namespace HairGlossStudio.Editor
             string globalId = GetGlobalIdString(renderer);
             string hierarchyPath = GetHierarchyPath(renderer.transform);
 
-            if (!TryFindRecordIndex(globalId, hierarchyPath, submeshIndex, out int index))
+            if (!TryFindRecordIndex(globalId, hierarchyPath, submeshIndex, out int index, GetLegacyHierarchyPath(renderer.transform)))
             {
                 return false;
             }
@@ -366,7 +366,7 @@ namespace HairGlossStudio.Editor
             }
         }
 
-        private bool TryFindRecordIndex(string globalId, string hierarchyPath, int submeshIndex, out int index)
+        private bool TryFindRecordIndex(string globalId, string hierarchyPath, int submeshIndex, out int index, string legacyHierarchyPath = null)
         {
             index = -1;
             for (int i = 0; i < records.Count; i++)
@@ -390,7 +390,7 @@ namespace HairGlossStudio.Editor
                 if (GlobalObjectId.TryParse(r.rendererGlobalObjectId, out GlobalObjectId storedId) &&
                     GlobalObjectId.GlobalObjectIdentifierToObjectSlow(storedId) != null) continue;
 
-                if (MatchesHierarchyPath(r.rendererHierarchyPath, hierarchyPath))
+                if (MatchesHierarchyPath(r.rendererHierarchyPath, hierarchyPath, legacyHierarchyPath))
                 {
                     if (index >= 0) { index = -2; return false; }
                     index = i;
@@ -400,9 +400,11 @@ namespace HairGlossStudio.Editor
             return index >= 0;
         }
 
-        private static bool MatchesHierarchyPath(string storedPath, string hierarchyPath)
+        private static bool MatchesHierarchyPath(string storedPath, string hierarchyPath, string legacyHierarchyPath)
         {
             if (string.IsNullOrEmpty(storedPath) || string.IsNullOrEmpty(hierarchyPath)) return false;
+            if (storedPath.IndexOf('|') < 0)
+                return string.Equals(storedPath, legacyHierarchyPath, StringComparison.Ordinal);
             if (string.Equals(storedPath, hierarchyPath, StringComparison.Ordinal)) return true;
             int separator = hierarchyPath.IndexOf('|');
             return storedPath.StartsWith("|", StringComparison.Ordinal) && separator >= 0 &&
@@ -436,6 +438,17 @@ namespace HairGlossStudio.Editor
             }
 
             return $"{transform.gameObject.scene.path}|{string.Join("/", stack)}";
+        }
+
+        private static string GetLegacyHierarchyPath(Transform transform)
+        {
+            var stack = new Stack<string>();
+            while (transform != null)
+            {
+                stack.Push(transform.name);
+                transform = transform.parent;
+            }
+            return string.Join("/", stack);
         }
     }
 }

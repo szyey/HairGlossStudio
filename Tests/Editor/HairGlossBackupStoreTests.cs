@@ -46,7 +46,7 @@ namespace HairGlossStudio.Editor.Tests
 
         private bool Find(string globalId, string path)
         {
-            object[] args = { globalId, path, 0, -1 };
+            object[] args = { globalId, path, 0, -1, null };
             return (bool)typeof(HairGlossBackupStore)
                 .GetMethod("TryFindRecordIndex", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(store, args);
         }
@@ -91,6 +91,52 @@ namespace HairGlossStudio.Editor.Tests
             Records.Add(new RendererMaterialRecord { rendererGlobalObjectId = id });
             Records.Add(new RendererMaterialRecord { rendererGlobalObjectId = id });
             Assert.IsFalse(Find(id, string.Empty));
+        }
+
+        [TestCase("")]
+        [TestCase("unresolvable legacy id")]
+        public void NameOnlyLegacyRecordsAreUpgradedOnMatch(string globalId)
+        {
+            Renderer renderer = root.AddComponent<MeshRenderer>();
+            renderer.sharedMaterial = generated;
+            Records.Add(new RendererMaterialRecord
+            {
+                rendererHierarchyPath = root.name, rendererGlobalObjectId = globalId,
+                originalMaterial = original, generatedMaterial = generated
+            });
+            Assert.AreEqual(store, HairGlossBackupStore.FindForTarget(renderer, 0));
+            Assert.IsTrue(store.TryGetRecord(renderer, 0, out RendererMaterialRecord record));
+            Assert.AreEqual(HairGlossBackupStore.GetHierarchyPath(root.transform), record.rendererHierarchyPath);
+            Assert.AreEqual(HairGlossBackupStore.GetGlobalIdString(renderer), record.rendererGlobalObjectId);
+            Assert.AreEqual(original, record.originalMaterial);
+            Assert.IsTrue(store.RestoreTarget(renderer, 0));
+            Assert.AreEqual(original, renderer.sharedMaterial);
+        }
+
+        [Test]
+        public void DuplicateNameOnlyLegacyRecordsAreNotMigrated()
+        {
+            Renderer renderer = root.AddComponent<MeshRenderer>();
+            Records.Add(new RendererMaterialRecord { rendererHierarchyPath = root.name, originalMaterial = original });
+            Records.Add(new RendererMaterialRecord { rendererHierarchyPath = root.name, originalMaterial = original });
+            Assert.IsNull(HairGlossBackupStore.FindForTarget(renderer, 0, out bool ambiguous));
+            Assert.IsTrue(ambiguous);
+            Assert.IsFalse(store.TryGetRecord(renderer, 0, out _));
+            foreach (RendererMaterialRecord record in Records) Assert.AreEqual(root.name, record.rendererHierarchyPath);
+        }
+
+        [Test]
+        public void ResolvableLegacyIdPreventsNameOnlyFallback()
+        {
+            Renderer renderer = root.AddComponent<MeshRenderer>();
+            Records.Add(new RendererMaterialRecord
+            {
+                rendererHierarchyPath = root.name,
+                rendererGlobalObjectId = HairGlossBackupStore.GetGlobalIdString(original),
+                originalMaterial = original
+            });
+            Assert.IsFalse(store.TryGetRecord(renderer, 0, out _));
+            Assert.AreEqual(root.name, Records[0].rendererHierarchyPath);
         }
 
         [Test]
