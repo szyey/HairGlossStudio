@@ -1,0 +1,7 @@
+{
+  "name": "HairGlossStudio.Editor.Tests",
+  "rootNamespace": "HairGlossStudio.Editor.Tests",
+  "references": ["HairGlossStudio.Editor"],
+  "includePlatforms": ["Editor"],
+  "optionalUnityReferences": ["TestAssemblies"]
+}

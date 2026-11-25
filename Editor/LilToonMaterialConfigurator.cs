@@ -152,32 +152,36 @@ namespace HairGlossStudio.Editor
 
         private static void SyncShaderKeywords(Material mat, HairGlossSettings settings)
         {
-            if (settings.strandBumpScale > 0.001f)
-            {
-                mat.EnableKeyword("_NORMALMAP");
-            }
-
-            // If lilToon Multi shader is used, enable Multi-variant feature keywords safely
             if (mat.shader != null && mat.shader.name.IndexOf("Multi", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                if (settings.matCapSlot == MatCapSlotMode.MatCap1st)
-                {
-                    mat.EnableKeyword("GEOM_TYPE_BRANCH_DETAIL");
-                }
-                if (settings.enableAnisotropy)
-                {
-                    mat.EnableKeyword("GEOM_TYPE_BRANCH");
-                }
+                if (InvokeLilToonSetupReflection(mat)) return;
+                SetKeyword(mat, "_NORMALMAP", IsFeatureEnabled(mat, "_UseBumpMap"));
+                SetKeyword(mat, "SOURCE_GBUFFER", IsFeatureEnabled(mat, "_UseAnisotropy"));
+                SetKeyword(mat, "_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A", IsFeatureEnabled(mat, "_UseMatCap"));
+                SetKeyword(mat, "_SPECULARHIGHLIGHTS_OFF", IsFeatureEnabled(mat, "_UseMatCap2nd"));
+                SetKeyword(mat, "EFFECT_BUMP", IsFeatureEnabled(mat, "_UseBump2ndMap"));
+                SetKeyword(mat, "GEOM_TYPE_MESH",
+                    (IsFeatureEnabled(mat, "_UseMatCap") && IsFeatureEnabled(mat, "_MatCapCustomNormal")) ||
+                    (IsFeatureEnabled(mat, "_UseMatCap2nd") && IsFeatureEnabled(mat, "_MatCap2ndCustomNormal")));
             }
-
-            InvokeLilToonSetupReflection(mat);
         }
 
-        private static void InvokeLilToonSetupReflection(Material mat)
+        private static bool IsFeatureEnabled(Material mat, string propertyName)
+        {
+            return mat.HasProperty(propertyName) && mat.GetFloat(propertyName) > 0.5f;
+        }
+
+        private static void SetKeyword(Material mat, string keyword, bool enabled)
+        {
+            if (enabled) mat.EnableKeyword(keyword);
+            else mat.DisableKeyword(keyword);
+        }
+
+        private static bool InvokeLilToonSetupReflection(Material mat)
         {
             try
             {
-                string[] candidateMethods = { "CheckShaderType", "SetupMaterialWithQueue", "MaterialOptimize" };
+                string[] candidateMethods = { "SetupMultiMaterial" };
                 Type[] matArgTypes = { typeof(Material) };
                 object[] args = { mat };
 
@@ -207,6 +211,7 @@ namespace HairGlossStudio.Editor
                             if (method != null)
                             {
                                 method.Invoke(null, args);
+                                return true;
                             }
                         }
                     }
@@ -214,8 +219,9 @@ namespace HairGlossStudio.Editor
             }
             catch
             {
-                // Non-fatal: standard lilToon shaders evaluate float toggles directly
+                // Fall back to the supported Multi keyword mapping.
             }
+            return false;
         }
 
         private static void SetFloatSafe(Material mat, string propertyName, float value)

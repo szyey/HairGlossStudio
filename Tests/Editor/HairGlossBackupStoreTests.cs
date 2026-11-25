@@ -1,0 +1,186 @@
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using NUnit.Framework;
+using UnityEditor;
+using UnityEngine;
+
+namespace HairGlossStudio.Editor.Tests
+{
+    public class HairGlossBackupStoreTests
+    {
+        private string folder;
+        private HairGlossBackupStore store;
+        private GameObject root;
+        private Material original;
+        private Material generated;
+
+        [SetUp]
+        public void SetUp()
+        {
+            folder = $"Assets/HairGlossStudioTests_{Guid.NewGuid():N}";
+            AssetDatabase.CreateFolder("Assets", folder.Substring("Assets/".Length));
+            store = HairGlossBackupStore.LoadOrCreate($"{folder}/Backup.asset");
+            root = new GameObject("HairGlossStudioTests");
+            Shader shader = Shader.Find("Hidden/InternalErrorShader");
+            original = new Material(shader);
+            generated = new Material(shader);
+            AssetDatabase.CreateAsset(original, $"{folder}/Original.mat");
+            AssetDatabase.CreateAsset(generated, $"{folder}/Generated.mat");
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            Undo.ClearUndo(root);
+            Undo.ClearUndo(store);
+            UnityEngine.Object.DestroyImmediate(root);
+            AssetDatabase.DeleteAsset(folder);
+        }
+
+        private List<RendererMaterialRecord> Records =>
+            (List<RendererMaterialRecord>)typeof(HairGlossBackupStore)
+                .GetField("records", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(store);
+
+        private bool Find(string globalId, string path)
+        {
+            object[] args = { globalId, path, 0, -1 };
+            return (bool)typeof(HairGlossBackupStore)
+                .GetMethod("TryFindRecordIndex", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(store, args);
+        }
+
+        [Test]
+        public void EmptyStoreDoesNotMatch()
+        {
+            Assert.IsFalse(Find(string.Empty, "scene|0:Hair"));
+        }
+
+        [Test]
+        public void ResolvableGlobalIdPreventsHierarchyFallback()
+        {
+            Records.Add(new RendererMaterialRecord
+            {
+                rendererGlobalObjectId = HairGlossBackupStore.GetGlobalIdString(original),
+                rendererHierarchyPath = "scene|0:Hair"
+            });
+            Assert.IsFalse(Find(HairGlossBackupStore.GetGlobalIdString(generated), "scene|0:Hair"));
+            Assert.IsTrue(Find(HairGlossBackupStore.GetGlobalIdString(original), "renamed"));
+        }
+
+        [TestCase("")]
+        [TestCase("invalid legacy id")]
+        public void LegacyFallbackRequiresUniqueScopedPath(string globalId)
+        {
+            Records.Add(new RendererMaterialRecord
+            {
+                rendererGlobalObjectId = globalId,
+                rendererHierarchyPath = "scene|0:Hair"
+            });
+            Assert.IsTrue(Find(string.Empty, "scene|0:Hair"));
+            Assert.IsFalse(Find(string.Empty, "otherScene|0:Hair"));
+            Records.Add(new RendererMaterialRecord { rendererHierarchyPath = "scene|0:Hair" });
+            Assert.IsFalse(Find(string.Empty, "scene|0:Hair"));
+        }
+
+        [Test]
+        public void DuplicateGlobalIdsAreRejected()
+        {
+            string id = HairGlossBackupStore.GetGlobalIdString(original);
+            Records.Add(new RendererMaterialRecord { rendererGlobalObjectId = id });
+            Records.Add(new RendererMaterialRecord { rendererGlobalObjectId = id });
+            Assert.IsFalse(Find(id, string.Empty));
+        }
+
+        [Test]
+        public void AmbiguousDiscoveryDoesNotCreateAnotherBackup()
+        {
+            Renderer renderer = root.AddComponent<MeshRenderer>();
+            string path = HairGlossBackupStore.GetHierarchyPath(renderer.transform);
+            Records.Add(new RendererMaterialRecord { rendererHierarchyPath = path });
+            Records.Add(new RendererMaterialRecord { rendererHierarchyPath = path });
+            Assert.IsNull(HairGlossBackupStore.FindForTarget(renderer, 0, out bool ambiguous));
+            Assert.IsTrue(ambiguous);
+            Assert.Throws<InvalidOperationException>(() =>
+                store.RegisterBackup(renderer, 0, original, generated, Array.Empty<string>()));
+            Assert.AreEqual(2, store.Records.Count);
+        }
+
+        [Test]
+        public void HierarchyPathIncludesSceneAndSiblingIndices()
+        {
+            var first = new GameObject("Hair");
+            var second = new GameObject("Hair");
+            first.transform.SetParent(root.transform);
+            second.transform.SetParent(root.transform);
+            string path = HairGlossBackupStore.GetHierarchyPath(first.transform);
+            Assert.That(path, Does.StartWith(root.scene.path + "|"));
+            Assert.That(path, Does.EndWith("/0:Hair"));
+            Assert.AreNotEqual(path, HairGlossBackupStore.GetHierarchyPath(second.transform));
+        }
+
+        [Test]
+        public void RevertUndoRestoresMaterialAndBackupRecord()
+        {
+            Renderer renderer = root.AddComponent<MeshRenderer>();
+            renderer.sharedMaterials = new[] { generated };
+            store.RegisterBackup(renderer, 0, original, generated, Array.Empty<string>());
+            Undo.FlushUndoRecordObjects();
+            Undo.IncrementCurrentGroup();
+            int group = Undo.GetCurrentGroup();
+            Assert.IsTrue(store.RestoreTarget(renderer, 0));
+            Assert.AreEqual(original, renderer.sharedMaterials[0]);
+            Assert.AreEqual(0, store.Records.Count);
+            Undo.FlushUndoRecordObjects();
+            Undo.CollapseUndoOperations(group);
+            Undo.PerformUndo();
+            Assert.AreEqual(generated, renderer.sharedMaterials[0]);
+            Assert.IsTrue(store.TryGetRecord(renderer, 0, out _));
+        }
+
+        [Test]
+        public void StoreDiscoveryDoesNotDependOnOutputFolder()
+        {
+            Renderer renderer = root.AddComponent<MeshRenderer>();
+            store.RegisterBackup(renderer, 0, original, generated, Array.Empty<string>());
+            Assert.AreEqual(store, HairGlossBackupStore.FindForTarget(renderer, 0));
+            Assert.IsFalse(store.OwnsGeneratedAssets(renderer, 0));
+        }
+
+        [Test]
+        public void NewTargetsWithSameNameGetSeparateTextureAssets()
+        {
+            Texture2D texture = new Texture2D(32, 32);
+            try
+            {
+                var settings = new HairGlossSettings { textureResolution = 32 };
+                HairTextureGenerator.SavedTextureSet first = HairTextureGenerator.SaveTexturesAsAssets(
+                    folder, "Hair", texture, texture, texture, settings);
+                string originalGuid = AssetDatabase.AssetPathToGUID(first.normalMapPath);
+                HairTextureGenerator.SavedTextureSet second = HairTextureGenerator.SaveTexturesAsAssets(
+                    folder, "Hair", texture, texture, texture, settings);
+                Assert.AreNotEqual(first.normalMapPath, second.normalMapPath);
+                Assert.AreNotEqual(first.matCapPath, second.matCapPath);
+                Assert.AreNotEqual(first.maskPath, second.maskPath);
+                Assert.AreEqual(originalGuid, AssetDatabase.AssetPathToGUID(first.normalMapPath));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(texture); }
+        }
+
+        [Test]
+        public void OwnershipRejectsReplacedTextureGuid()
+        {
+            Renderer renderer = root.AddComponent<MeshRenderer>();
+            string[] paths = new string[3];
+            for (int i = 0; i < paths.Length; i++)
+            {
+                paths[i] = $"{folder}/Texture{i}.asset";
+                AssetDatabase.CreateAsset(new Texture2D(2, 2), paths[i]);
+            }
+            store.RegisterBackup(renderer, 0, original, generated, paths);
+            Assert.IsTrue(store.OwnsGeneratedAssets(renderer, 0));
+            AssetDatabase.DeleteAsset(paths[0]);
+            AssetDatabase.CreateAsset(new Texture2D(2, 2), paths[0]);
+            Assert.IsFalse(store.OwnsGeneratedAssets(renderer, 0));
+        }
+    }
+}

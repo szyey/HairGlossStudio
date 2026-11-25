@@ -301,14 +301,18 @@ namespace HairGlossStudio.Editor
             Texture2D normalMap,
             Texture2D matCap,
             Texture2D mask,
-            HairGlossSettings settings)
+            HairGlossSettings settings,
+            string[] ownedTexturePaths = null)
         {
             EnsureFolderExists(outputFolder);
             string safeBase = SanitizeFileName(baseName);
 
-            string normalPath = Path.Combine(outputFolder, $"{safeBase}_FlowNormal.png").Replace('\\', '/');
-            string matCapPath = Path.Combine(outputFolder, $"{safeBase}_GlossMatCap.png").Replace('\\', '/');
-            string maskPath = Path.Combine(outputFolder, $"{safeBase}_GlossMask.png").Replace('\\', '/');
+            string normalPath = ownedTexturePaths != null ? ownedTexturePaths[0]
+                : AssetDatabase.GenerateUniqueAssetPath(Path.Combine(outputFolder, $"{safeBase}_FlowNormal.png").Replace('\\', '/'));
+            string matCapPath = ownedTexturePaths != null ? ownedTexturePaths[1]
+                : AssetDatabase.GenerateUniqueAssetPath(Path.Combine(outputFolder, $"{safeBase}_GlossMatCap.png").Replace('\\', '/'));
+            string maskPath = ownedTexturePaths != null ? ownedTexturePaths[2]
+                : AssetDatabase.GenerateUniqueAssetPath(Path.Combine(outputFolder, $"{safeBase}_GlossMask.png").Replace('\\', '/'));
 
             File.WriteAllBytes(normalPath, normalMap.EncodeToPNG());
             File.WriteAllBytes(matCapPath, matCap.EncodeToPNG());

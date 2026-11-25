@@ -30,6 +30,7 @@ namespace HairGlossStudio.Editor
         private HairGlossBackupStore backupStore;
         private string statusMessage;
         private MessageType statusMessageType = MessageType.Info;
+        private static string SettingsKey => $"HairGlossStudio.Settings.{Application.dataPath}";
 
         [MenuItem("Tools/Hair Gloss Studio (髪のツヤ設定)", false, 100)]
         [MenuItem("Tools/Chill-Bell Style/Hair Gloss Studio (髪のツヤ設定)", false, 100)]
@@ -42,6 +43,12 @@ namespace HairGlossStudio.Editor
 
         private void OnEnable()
         {
+            string savedSettings = EditorPrefs.GetString(SettingsKey, string.Empty);
+            if (!string.IsNullOrEmpty(savedSettings))
+            {
+                try { settings = JsonUtility.FromJson<HairGlossSettings>(savedSettings); }
+                catch (ArgumentException) { settings = new HairGlossSettings(); }
+            }
             if (settings == null)
             {
                 settings = new HairGlossSettings();
@@ -65,6 +72,7 @@ namespace HairGlossStudio.Editor
 
         private void OnDisable()
         {
+            EditorPrefs.SetString(SettingsKey, JsonUtility.ToJson(settings));
             if (previewRenderer != null)
             {
                 previewRenderer.Dispose();
@@ -95,6 +103,7 @@ namespace HairGlossStudio.Editor
 
             if (settingsChanged)
             {
+                EditorPrefs.SetString(SettingsKey, JsonUtility.ToJson(settings));
                 RebuildPreviewTextures();
                 if (liveScenePreview)
                 {
@@ -202,8 +211,9 @@ namespace HairGlossStudio.Editor
                     if (t.isSelected && t.isLilToon)
                     {
                         selectedLilCount++;
-                        Material baseMat = existingStore != null
-                            ? existingStore.GetOriginalMaterial(t.renderer, t.submeshIndex)
+                        HairGlossBackupStore targetStore = HairGlossBackupStore.FindForTarget(t.renderer, t.submeshIndex);
+                        Material baseMat = targetStore != null
+                            ? targetStore.GetOriginalMaterial(t.renderer, t.submeshIndex)
                             : t.originalMaterial;
                         if (LilToonMaterialConfigurator.IsMatCap1stActive(baseMat))
                         {
@@ -261,8 +271,7 @@ namespace HairGlossStudio.Editor
                             GUI.color = t.isLilToon ? new Color(0.65f, 1f, 0.72f) : new Color(1f, 0.65f, 0.55f);
                             GUILayout.Label(shaderTag, EditorStyles.miniButton, GUILayout.Width(56));
 
-                            bool hasBackup = existingStore != null &&
-                                             existingStore.TryGetRecord(t.renderer, t.submeshIndex, out _);
+                            bool hasBackup = HairGlossBackupStore.FindForTarget(t.renderer, t.submeshIndex) != null;
                             GUI.color = hasBackup ? new Color(0.65f, 0.85f, 1f) : new Color(0.85f, 0.85f, 0.85f);
                             GUILayout.Label(hasBackup ? "適用済み" : "オリジナル", EditorStyles.miniButton, GUILayout.Width(64));
                             GUI.color = prevColor;
@@ -622,10 +631,10 @@ namespace HairGlossStudio.Editor
 
             targets.AddRange(HairTargetDetector.DetectTargets(targetRoot, includeAllRenderers));
 
-            HairGlossBackupStore store = GetBackupStoreIfExists();
-            if (store != null)
+            foreach (HairMaterialTarget t in targets)
             {
-                foreach (HairMaterialTarget t in targets)
+                HairGlossBackupStore store = HairGlossBackupStore.FindForTarget(t.renderer, t.submeshIndex);
+                if (store != null)
                 {
                     if (store.TryGetRecord(t.renderer, t.submeshIndex, out RendererMaterialRecord rec) &&
                         rec.originalMaterial != null)
@@ -700,6 +709,17 @@ namespace HairGlossStudio.Editor
                 return;
             }
 
+            foreach (HairMaterialTarget target in selected)
+            {
+                HairGlossBackupStore.FindForTarget(target.renderer, target.submeshIndex, out bool ambiguous);
+                if (ambiguous)
+                {
+                    statusMessage = "複数のバックアップが対象に一致するため、適用を中止しました。バックアップを確認してください。";
+                    statusMessageType = MessageType.Error;
+                    return;
+                }
+            }
+
             string rootFolder = string.IsNullOrWhiteSpace(settings.outputFolder)
                 ? "Assets/HairGlossStudio_Generated"
                 : settings.outputFolder.Replace('\\', '/').TrimEnd('/');
@@ -708,14 +728,18 @@ namespace HairGlossStudio.Editor
             string targetOutputFolder = $"{rootFolder}/{avatarFolderName}";
             HairTextureGenerator.EnsureFolderExists(targetOutputFolder);
 
-            HairGlossBackupStore store = HairGlossBackupStore.LoadOrCreate($"{rootFolder}/HairGlossBackupStore.asset");
+            HairGlossBackupStore defaultStore = HairGlossBackupStore.LoadOrCreate();
             int appliedCount = 0;
+            Undo.IncrementCurrentGroup();
+            int undoGroup = Undo.GetCurrentGroup();
+            Undo.SetCurrentGroupName("Apply Hair Gloss Studio");
 
             try
             {
                 for (int i = 0; i < selected.Count; i++)
                 {
                     HairMaterialTarget target = selected[i];
+                    HairGlossBackupStore store = HairGlossBackupStore.FindForTarget(target.renderer, target.submeshIndex) ?? defaultStore;
                     EditorUtility.DisplayProgressBar(
                         "Hair Gloss Studio",
                         $"毛流れ解析・ツヤ生成中 ({i + 1}/{selected.Count}): {target.DisplayName}",
@@ -753,21 +777,24 @@ namespace HairGlossStudio.Editor
                     Texture2D rawMask = HairTextureGenerator.GenerateGlossMask(analysis, settings);
 
                     string baseAssetName = $"{originalMat.name}_{target.renderer.name}_S{target.submeshIndex}";
+                    bool ownsAssets = store.OwnsGeneratedAssets(target.renderer, target.submeshIndex);
+                    store.TryGetRecord(target.renderer, target.submeshIndex, out RendererMaterialRecord existingRecord);
                     HairTextureGenerator.SavedTextureSet savedTextures = HairTextureGenerator.SaveTexturesAsAssets(
                         targetOutputFolder,
                         baseAssetName,
                         rawNormal,
                         rawMatCap,
                         rawMask,
-                        settings);
+                        settings,
+                        ownsAssets ? existingRecord.generatedTexturePaths : null);
 
                     DestroyImmediate(rawNormal);
                     DestroyImmediate(rawMatCap);
                     DestroyImmediate(rawMask);
 
-                    string matAssetPath = Path.Combine(
+                    string matAssetPath = ownsAssets ? AssetDatabase.GetAssetPath(existingRecord.generatedMaterial) : AssetDatabase.GenerateUniqueAssetPath(Path.Combine(
                         targetOutputFolder,
-                        $"{HairTextureGenerator.SanitizeFileName(baseAssetName)}_HairGloss.mat").Replace('\\', '/');
+                        $"{HairTextureGenerator.SanitizeFileName(baseAssetName)}_HairGloss.mat").Replace('\\', '/'));
 
                     Material clonedMat = AssetDatabase.LoadAssetAtPath<Material>(matAssetPath);
                     if (clonedMat == null)
@@ -794,6 +821,7 @@ namespace HairGlossStudio.Editor
                         Undo.RecordObject(target.renderer, "Apply Hair Gloss Studio");
                         sharedMats[target.submeshIndex] = clonedMat;
                         target.renderer.sharedMaterials = sharedMats;
+                        PrefabUtility.RecordPrefabInstancePropertyModifications(target.renderer);
                         EditorUtility.SetDirty(target.renderer);
 
                         store.RegisterBackup(
@@ -819,6 +847,7 @@ namespace HairGlossStudio.Editor
             }
             finally
             {
+                Undo.CollapseUndoOperations(undoGroup);
                 EditorUtility.ClearProgressBar();
             }
 
@@ -836,8 +865,22 @@ namespace HairGlossStudio.Editor
                 return;
             }
 
-            HairGlossBackupStore store = GetBackupStoreIfExists();
-            int restored = store != null ? store.RestoreAllUnderRoot(targetRoot, false) : 0;
+            Undo.IncrementCurrentGroup();
+            int undoGroup = Undo.GetCurrentGroup();
+            Undo.SetCurrentGroupName("Revert Hair Gloss Studio");
+            int restored = 0;
+            try
+            {
+                foreach (Renderer renderer in targetRoot.GetComponentsInChildren<Renderer>(true))
+                {
+                    for (int i = 0; i < renderer.sharedMaterials.Length; i++)
+                    {
+                        HairGlossBackupStore store = HairGlossBackupStore.FindForTarget(renderer, i);
+                        if (store != null && store.RestoreTarget(renderer, i)) restored++;
+                    }
+                }
+            }
+            finally { Undo.CollapseUndoOperations(undoGroup); }
 
             LoadTargets();
             statusMessage = restored > 0
@@ -848,15 +891,18 @@ namespace HairGlossStudio.Editor
 
         private HairGlossBackupStore GetBackupStoreIfExists()
         {
-            string rootFolder = string.IsNullOrWhiteSpace(settings.outputFolder)
-                ? "Assets/HairGlossStudio_Generated"
-                : settings.outputFolder.Replace('\\', '/').TrimEnd('/');
-
-            string storePath = $"{rootFolder}/HairGlossBackupStore.asset";
-            if (backupStore == null || AssetDatabase.GetAssetPath(backupStore) != storePath)
+            if (targetRoot != null)
             {
-                backupStore = AssetDatabase.LoadAssetAtPath<HairGlossBackupStore>(storePath);
+                foreach (Renderer renderer in targetRoot.GetComponentsInChildren<Renderer>(true))
+                {
+                    for (int i = 0; i < renderer.sharedMaterials.Length; i++)
+                    {
+                        HairGlossBackupStore store = HairGlossBackupStore.FindForTarget(renderer, i);
+                        if (store != null) return store;
+                    }
+                }
             }
+            backupStore = AssetDatabase.LoadAssetAtPath<HairGlossBackupStore>(HairGlossBackupStore.DefaultStoreAssetPath);
             return backupStore;
         }
     }
