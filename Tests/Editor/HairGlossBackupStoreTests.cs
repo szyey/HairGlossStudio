@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Reflection;
 using NUnit.Framework;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace HairGlossStudio.Editor.Tests
 {
@@ -89,6 +91,45 @@ namespace HairGlossStudio.Editor.Tests
             Records.Add(new RendererMaterialRecord { rendererGlobalObjectId = id });
             Records.Add(new RendererMaterialRecord { rendererGlobalObjectId = id });
             Assert.IsFalse(Find(id, string.Empty));
+        }
+
+        [Test]
+        public void UnsavedSceneFallbackMatchesAfterSavingButRejectsAmbiguousRecords()
+        {
+            Records.Add(new RendererMaterialRecord { rendererHierarchyPath = "|0:Hair" });
+            Assert.IsTrue(Find(string.Empty, "Assets/Saved.unity|0:Hair"));
+            Assert.IsFalse(Find(string.Empty, "Assets/Saved.unity|1:Hair"));
+            Records.Add(new RendererMaterialRecord { rendererHierarchyPath = "Assets/Saved.unity|0:Hair" });
+            Assert.IsFalse(Find(string.Empty, "Assets/Saved.unity|0:Hair"));
+        }
+
+        [Test]
+        public void FirstSceneSaveRefreshesBackupIdentityAndPreservesOriginalOnReapply()
+        {
+            Scene originalScene = root.scene;
+            Scene scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
+            try
+            {
+                SceneManager.MoveGameObjectToScene(root, scene);
+                Renderer renderer = root.AddComponent<MeshRenderer>();
+                renderer.sharedMaterial = generated;
+                store.RegisterBackup(renderer, 0, original, generated, Array.Empty<string>());
+                Assert.That(store.Records[0].rendererHierarchyPath, Does.StartWith("|"));
+                Assert.IsTrue(EditorSceneManager.SaveScene(scene, $"{folder}/Saved.unity"));
+                Assert.IsTrue(store.TryGetRecord(renderer, 0, out RendererMaterialRecord record));
+                Assert.AreEqual(HairGlossBackupStore.GetHierarchyPath(root.transform), record.rendererHierarchyPath);
+                Assert.AreEqual(HairGlossBackupStore.GetGlobalIdString(renderer), record.rendererGlobalObjectId);
+                store.RegisterBackup(renderer, 0, generated, generated, Array.Empty<string>());
+                Assert.AreEqual(1, store.Records.Count);
+                Assert.AreEqual(original, record.originalMaterial);
+                Assert.IsTrue(store.RestoreTarget(renderer, 0));
+                Assert.AreEqual(original, renderer.sharedMaterial);
+            }
+            finally
+            {
+                SceneManager.MoveGameObjectToScene(root, originalScene);
+                EditorSceneManager.CloseScene(scene, true);
+            }
         }
 
         [Test]

@@ -68,6 +68,7 @@ namespace HairGlossStudio.Editor
                 if (!found) continue;
                 match = store;
             }
+            if (match != null) match.TryGetRecord(renderer, submeshIndex, out _);
             return match;
         }
 
@@ -182,6 +183,13 @@ namespace HairGlossStudio.Editor
             if (TryFindRecordIndex(globalId, hierarchyPath, submeshIndex, out int index))
             {
                 record = records[index];
+                if (record.rendererGlobalObjectId != globalId || record.rendererHierarchyPath != hierarchyPath)
+                {
+                    Undo.RecordObject(this, "Refresh Hair Gloss Studio Backup Identity");
+                    record.rendererGlobalObjectId = globalId;
+                    record.rendererHierarchyPath = hierarchyPath;
+                    EditorUtility.SetDirty(this);
+                }
                 return true;
             }
 
@@ -382,8 +390,7 @@ namespace HairGlossStudio.Editor
                 if (GlobalObjectId.TryParse(r.rendererGlobalObjectId, out GlobalObjectId storedId) &&
                     GlobalObjectId.GlobalObjectIdentifierToObjectSlow(storedId) != null) continue;
 
-                if (!string.IsNullOrEmpty(hierarchyPath) &&
-                    string.Equals(r.rendererHierarchyPath, hierarchyPath, StringComparison.Ordinal))
+                if (MatchesHierarchyPath(r.rendererHierarchyPath, hierarchyPath))
                 {
                     if (index >= 0) { index = -2; return false; }
                     index = i;
@@ -391,6 +398,15 @@ namespace HairGlossStudio.Editor
             }
 
             return index >= 0;
+        }
+
+        private static bool MatchesHierarchyPath(string storedPath, string hierarchyPath)
+        {
+            if (string.IsNullOrEmpty(storedPath) || string.IsNullOrEmpty(hierarchyPath)) return false;
+            if (string.Equals(storedPath, hierarchyPath, StringComparison.Ordinal)) return true;
+            int separator = hierarchyPath.IndexOf('|');
+            return storedPath.StartsWith("|", StringComparison.Ordinal) && separator >= 0 &&
+                string.Equals(storedPath.Substring(1), hierarchyPath.Substring(separator + 1), StringComparison.Ordinal);
         }
 
         public static string GetGlobalIdString(UnityEngine.Object obj)
