@@ -17,28 +17,51 @@ namespace HairGlossStudio.Editor
             return mat.HasProperty("_UseMatCap") && mat.GetFloat("_UseMatCap") > 0.5f;
         }
 
-        public static void ConfigureMaterial(
+        public static bool TryResolveMatCapSlot(Material mat, MatCapSlotMode requested, out MatCapSlotMode resolved)
+        {
+            resolved = MatCapSlotMode.Auto;
+            if (mat == null) return false;
+            bool supports1st = mat.HasProperty("_UseMatCap") && mat.HasProperty("_MatCapTex");
+            bool supports2nd = mat.HasProperty("_UseMatCap2nd") && mat.HasProperty("_MatCap2ndTex");
+            if (requested == MatCapSlotMode.MatCap1st && supports1st)
+                resolved = MatCapSlotMode.MatCap1st;
+            else if (requested == MatCapSlotMode.MatCap2nd && supports2nd)
+                resolved = MatCapSlotMode.MatCap2nd;
+            else if (requested == MatCapSlotMode.Auto)
+            {
+                if (supports1st && !IsFeatureEnabled(mat, "_UseMatCap")) resolved = MatCapSlotMode.MatCap1st;
+                else if (supports2nd && !IsFeatureEnabled(mat, "_UseMatCap2nd")) resolved = MatCapSlotMode.MatCap2nd;
+            }
+            return resolved != MatCapSlotMode.Auto;
+        }
+
+        public static bool ConfigureMaterial(
             Material mat,
             HairGlossSettings settings,
             Texture2D flowNormal,
             Texture2D matCapTex,
             Texture2D maskTex,
-            Texture2D tangentMap)
+            Texture2D tangentMap,
+            bool logMatCapWarning = true)
         {
             if (mat == null || settings == null)
             {
-                return;
+                return false;
             }
 
             // 1. MatCap Configuration (1st or 2nd slot)
-            bool use2nd = settings.matCapSlot == MatCapSlotMode.MatCap2nd;
-            if (!use2nd)
+            bool configureMatCap = TryResolveMatCapSlot(mat, settings.matCapSlot, out MatCapSlotMode resolvedSlot);
+            if (configureMatCap && resolvedSlot == MatCapSlotMode.MatCap1st)
             {
                 ConfigureMatCap1st(mat, settings, flowNormal, matCapTex, maskTex);
             }
-            else
+            else if (configureMatCap)
             {
                 ConfigureMatCap2nd(mat, settings, flowNormal, matCapTex, maskTex);
+            }
+            else if (logMatCapWarning)
+            {
+                Debug.LogWarning($"Hair Gloss Studio: {mat.name} has no free compatible MatCap slot. MatCap was skipped; explicitly select a slot to allow replacement.", mat);
             }
 
             // 2. Anisotropy Configuration
@@ -52,8 +75,8 @@ namespace HairGlossStudio.Editor
             SetFloatSafe(mat, "_AnisotropyShiftNoiseScale", settings.anisotropyShiftNoiseScale);
             SetFloatSafe(mat, "_AnisotropySpecularStrength", settings.anisotropySpecularStrength);
             SetFloatSafe(mat, "_Anisotropy2ndSpecularStrength", 0.5f);
-            SetFloatSafe(mat, "_AnisotropyMatCapStrength", settings.anisotropyMatCapStrength);
-            SetFloatSafe(mat, "_Anisotropy2ndMatCapStrength", settings.anisotropyMatCapStrength);
+            if (configureMatCap)
+                SetFloatSafe(mat, resolvedSlot == MatCapSlotMode.MatCap1st ? "_AnisotropyMatCapStrength" : "_Anisotropy2ndMatCapStrength", settings.anisotropyMatCapStrength);
 
             // 3. Reflection / Specular Configuration
             if (settings.enableAnisotropy)
@@ -89,6 +112,7 @@ namespace HairGlossStudio.Editor
             // 5. Synchronize shader keywords and lilToon Multi variants
             SyncShaderKeywords(mat, settings);
             EditorUtility.SetDirty(mat);
+            return configureMatCap;
         }
 
         private static void ConfigureMatCap1st(

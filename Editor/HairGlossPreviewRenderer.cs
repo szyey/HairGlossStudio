@@ -53,7 +53,7 @@ namespace HairGlossStudio.Editor
 
         private readonly List<ScenePreviewEntry> activeScenePreviews = new List<ScenePreviewEntry>();
 
-        private readonly Dictionary<string, HairFlowAnalyzer.AnalysisResult> analysisCache = new Dictionary<string, HairFlowAnalyzer.AnalysisResult>();
+        private readonly HairFlowAnalyzer.AnalysisCache analysisCache = new HairFlowAnalyzer.AnalysisCache();
         private readonly Dictionary<string, PreviewTextureSet> textureCache = new Dictionary<string, PreviewTextureSet>();
         private PreviewTextureSet referenceTextures;
         private string cachedSettings;
@@ -154,14 +154,10 @@ namespace HairGlossStudio.Editor
                 analysisCache.Clear();
                 cachedFlowWeight = flowWeight;
             }
-            string analysisKey = $"{(mesh != null ? mesh.GetInstanceID() : 0)}:{submesh}:{(mainTex != null ? mainTex.GetInstanceID() : 0)}:{flowWeight:R}";
+            string analysisKey = HairFlowAnalyzer.GetAnalysisCacheKey(mesh, submesh, mainTex, PreviewResolution, flowWeight);
             string textureKey = $"{analysisKey}:{baseColor.r:R}:{baseColor.g:R}:{baseColor.b:R}";
             if (textureCache.TryGetValue(textureKey, out PreviewTextureSet cached)) return cached;
-            if (!analysisCache.TryGetValue(analysisKey, out HairFlowAnalyzer.AnalysisResult analysis))
-            {
-                analysis = HairFlowAnalyzer.AnalyzeFlowField(mesh, submesh, mainTex, PreviewResolution, flowWeight);
-                analysisCache.Add(analysisKey, analysis);
-            }
+            HairFlowAnalyzer.AnalysisResult analysis = analysisCache.GetOrAnalyze(mesh, submesh, mainTex, PreviewResolution, flowWeight);
             var textures = new PreviewTextureSet();
             try
             {
@@ -287,7 +283,8 @@ namespace HairGlossStudio.Editor
                     textures.normal,
                     textures.matCap,
                     textures.mask,
-                    textures.tangent);
+                    textures.tangent,
+                    false);
             }
 
             // Revert any entries no longer selected
@@ -509,7 +506,7 @@ namespace HairGlossStudio.Editor
 
                     // Toon shading base
                     float ndl = Vector3.Dot(normal, lightDir);
-                    float shadowFactor = Mathf.SmoothStep(-0.15f, 0.25f, ndl);
+                    float shadowFactor = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(-0.15f, 0.25f, ndl));
                     Color shadedBase = Color.Lerp(hairAlbedo * 0.52f, hairAlbedo, shadowFactor);
 
                     // Procedural strand variation on base hair
@@ -574,7 +571,7 @@ namespace HairGlossStudio.Editor
 
                     // Anti-aliased outer sphere edge
                     float r = Mathf.Sqrt(r2);
-                    float alphaEdge = Mathf.SmoothStep(0.92f, 0.89f, r);
+                    float alphaEdge = 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.89f, 0.92f, r));
                     pixels[row + px] = Color.Lerp(bgColor, new Color(
                         Mathf.Clamp01(combined.r),
                         Mathf.Clamp01(combined.g),

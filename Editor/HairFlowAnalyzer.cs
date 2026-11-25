@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace HairGlossStudio.Editor
@@ -20,6 +21,29 @@ namespace HairGlossStudio.Editor
             public float[] luminanceMap;
             public Color[] baseColorMap;
             public Color averageBaseColor;
+        }
+
+        public class AnalysisCache
+        {
+            private readonly Dictionary<string, AnalysisResult> results = new Dictionary<string, AnalysisResult>();
+
+            public AnalysisResult GetOrAnalyze(Mesh mesh, int submeshIndex, Texture2D mainTex, int resolution, float flowAnalyzeWeight)
+            {
+                string key = GetAnalysisCacheKey(mesh, submeshIndex, mainTex, resolution, flowAnalyzeWeight);
+                if (!results.TryGetValue(key, out AnalysisResult result))
+                {
+                    result = AnalyzeFlowField(mesh, submeshIndex, mainTex, resolution, flowAnalyzeWeight);
+                    results.Add(key, result);
+                }
+                return result;
+            }
+
+            public void Clear() { results.Clear(); }
+        }
+
+        public static string GetAnalysisCacheKey(Mesh mesh, int submeshIndex, Texture2D mainTex, int resolution, float flowAnalyzeWeight)
+        {
+            return FormattableString.Invariant($"{(mesh != null ? mesh.GetInstanceID() : 0)}:{submeshIndex}:{(mainTex != null ? mainTex.GetInstanceID() : 0)}:{Mathf.Clamp(resolution, 64, 2048)}:{flowAnalyzeWeight:R}");
         }
 
         private static readonly float[] GaussianWeights7 =
@@ -87,14 +111,11 @@ namespace HairGlossStudio.Editor
             }
 
             // Compute Structure Tensor from main texture luminance when enabled
-            Vector2[] finalFlow = new Vector2[pixelCount];
+            Vector2[] finalFlow = macroFlow;
             if (mainTex != null && flowAnalyzeWeight > 0.001f)
             {
+                finalFlow = new Vector2[pixelCount];
                 ComputeStructureTensorFlow(size, luminance, macroFlow, flowAnalyzeWeight, finalFlow);
-            }
-            else
-            {
-                Array.Copy(macroFlow, finalFlow, pixelCount);
             }
 
             Color avgColor = ComputeAverageOccupiedColor(baseColors, occupancy);
@@ -357,18 +378,20 @@ namespace HairGlossStudio.Editor
             Vector2[] nextFlow = new Vector2[count];
             float[] nextOcc = new float[count];
             float[] nextRootTip = new float[count];
+            Vector2[] originalFlow = flow;
+            float[] originalOcc = paddedOccupancy;
+            float[] originalRootTip = rootTipMap;
 
             for (int iter = 0; iter < iterations; iter++)
             {
-                Array.Copy(flow, nextFlow, count);
-                Array.Copy(paddedOccupancy, nextOcc, count);
-                Array.Copy(rootTipMap, nextRootTip, count);
-
                 for (int y = 0; y < size; y++)
                 {
                     for (int x = 0; x < size; x++)
                     {
                         int idx = y * size + x;
+                        nextFlow[idx] = flow[idx];
+                        nextOcc[idx] = paddedOccupancy[idx];
+                        nextRootTip[idx] = rootTipMap[idx];
                         if (paddedOccupancy[idx] > 0.5f)
                         {
                             continue;
@@ -407,9 +430,15 @@ namespace HairGlossStudio.Editor
                     }
                 }
 
-                Array.Copy(nextFlow, flow, count);
-                Array.Copy(nextOcc, paddedOccupancy, count);
-                Array.Copy(nextRootTip, rootTipMap, count);
+                (flow, nextFlow) = (nextFlow, flow);
+                (paddedOccupancy, nextOcc) = (nextOcc, paddedOccupancy);
+                (rootTipMap, nextRootTip) = (nextRootTip, rootTipMap);
+            }
+            if (!ReferenceEquals(flow, originalFlow))
+            {
+                Array.Copy(flow, originalFlow, count);
+                Array.Copy(paddedOccupancy, originalOcc, count);
+                Array.Copy(rootTipMap, originalRootTip, count);
             }
         }
 

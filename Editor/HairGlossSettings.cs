@@ -37,7 +37,8 @@ namespace HairGlossStudio.Editor
     public enum MatCapSlotMode
     {
         MatCap1st,
-        MatCap2nd
+        MatCap2nd,
+        Auto
     }
 
     /// <summary>
@@ -84,7 +85,7 @@ namespace HairGlossStudio.Editor
         [Range(0f, 2f)]
         public float matCapNormalStrength = 1.0f;
 
-        public MatCapSlotMode matCapSlot = MatCapSlotMode.MatCap1st;
+        public MatCapSlotMode matCapSlot = MatCapSlotMode.Auto;
 
         // 0 = Normal, 1 = Add, 2 = Screen, 3 = Multiply
         public int matCapBlendMode = 1;

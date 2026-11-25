@@ -203,8 +203,7 @@ namespace HairGlossStudio.Editor
                 }
 
                 int selectedLilCount = 0;
-                bool hasExistingMatCap1st = false;
-                HairGlossBackupStore existingStore = GetBackupStoreIfExists();
+                bool hasMatCapConflict = false;
 
                 foreach (HairMaterialTarget t in targets)
                 {
@@ -215,10 +214,8 @@ namespace HairGlossStudio.Editor
                         Material baseMat = targetStore != null
                             ? targetStore.GetOriginalMaterial(t.renderer, t.submeshIndex)
                             : t.originalMaterial;
-                        if (LilToonMaterialConfigurator.IsMatCap1stActive(baseMat))
-                        {
-                            hasExistingMatCap1st = true;
-                        }
+                        if (!LilToonMaterialConfigurator.TryResolveMatCapSlot(baseMat, MatCapSlotMode.Auto, out _))
+                            hasMatCapConflict = true;
                     }
                 }
 
@@ -279,23 +276,13 @@ namespace HairGlossStudio.Editor
                     }
                 }
 
-                if (hasExistingMatCap1st && settings.matCapSlot == MatCapSlotMode.MatCap1st)
+                if (hasMatCapConflict && settings.matCapSlot == MatCapSlotMode.Auto)
                 {
-                    using (new EditorGUILayout.HorizontalScope(EditorStyles.helpBox))
-                    {
-                        EditorGUILayout.LabelField(
-                            "元マテリアルで MatCap 1st が有効です。上書きを避ける場合は MatCap 2nd を推奨します。",
-                            EditorStyles.wordWrappedMiniLabel);
-                        if (GUILayout.Button("MatCap 2ndに切替", GUILayout.Width(115), GUILayout.Height(28)))
-                        {
-                            settings.matCapSlot = MatCapSlotMode.MatCap2nd;
-                            RebuildPreviewTextures();
-                            if (liveScenePreview)
-                            {
-                                previewRenderer.UpdateScenePreview(targets, settings, existingStore);
-                            }
-                        }
-                    }
+                    EditorGUILayout.HelpBox("空きMatCapスロットがない対象は、既存MatCapを保持してMatCap設定のみスキップします。置き換える場合は詳細設定で1st/2ndを明示してください。", MessageType.Warning);
+                }
+                else if (settings.matCapSlot != MatCapSlotMode.Auto)
+                {
+                    EditorGUILayout.HelpBox("MatCapスロットを明示指定しています。選択したスロットの既存設定は生成マテリアルで置き換えられます。既存設定を保持する場合はAutoを選択してください。", MessageType.Info);
                 }
             }
         }
@@ -507,6 +494,7 @@ namespace HairGlossStudio.Editor
                         settings.textureResolution = ResolutionValues[nextResIdx];
 
                         settings.matCapSlot = (MatCapSlotMode)EditorGUILayout.EnumPopup("使用 MatCap スロット", settings.matCapSlot);
+                        EditorGUILayout.LabelField("Auto: 空き1st → 空き2nd。両方使用中はMatCapのみスキップ。", EditorStyles.wordWrappedMiniLabel);
                         settings.matCapBlendMode = EditorGUILayout.Popup("MatCap 合成モード", settings.matCapBlendMode, BlendModeLabels);
                         settings.matCapNormalStrength = EditorGUILayout.Slider("MatCap ノーマル強度", settings.matCapNormalStrength, 0f, 2f);
 
@@ -682,7 +670,7 @@ namespace HairGlossStudio.Editor
             previewRenderer.RebuildPreviews(reference, settings);
         }
 
-        private void ApplyGlossToSelectedTargets()
+        private void ApplyGlossToSelectedTargets(Func<string, float, bool> cancel = null)
         {
             if (targetRoot == null)
             {
@@ -742,6 +730,10 @@ namespace HairGlossStudio.Editor
                 return;
             }
             int appliedCount = 0;
+            bool cancelled = false;
+            var analysisCache = new HairFlowAnalyzer.AnalysisCache();
+            if (cancel == null)
+                cancel = (message, progress) => EditorUtility.DisplayCancelableProgressBar("Hair Gloss Studio", message, progress);
             Undo.IncrementCurrentGroup();
             int undoGroup = Undo.GetCurrentGroup();
             Undo.SetCurrentGroupName("Apply Hair Gloss Studio");
@@ -752,10 +744,12 @@ namespace HairGlossStudio.Editor
                 {
                     HairMaterialTarget target = selected[i];
                     HairGlossBackupStore store = HairGlossBackupStore.FindForTarget(target.renderer, target.submeshIndex) ?? defaultStore;
-                    EditorUtility.DisplayProgressBar(
-                        "Hair Gloss Studio",
-                        $"毛流れ解析・ツヤ生成中 ({i + 1}/{selected.Count}): {target.DisplayName}",
-                        (float)i / selected.Count);
+                    bool ShouldCancel(string stage, float fraction)
+                    {
+                        cancelled = cancel($"{stage} ({i + 1}/{selected.Count}): {target.DisplayName}", (i + fraction) / selected.Count);
+                        return cancelled;
+                    }
+                    if (ShouldCancel("毛流れ解析", 0f)) break;
 
                     Material originalMat = store.GetOriginalMaterial(target.renderer, target.submeshIndex);
                     if (originalMat == null)
@@ -771,7 +765,7 @@ namespace HairGlossStudio.Editor
                         : Color.white;
 
                     float flowWeight = settings.autoAnalyzeFlow ? settings.flowAnalyzeWeight : 0f;
-                    HairFlowAnalyzer.AnalysisResult analysis = HairFlowAnalyzer.AnalyzeFlowField(
+                    HairFlowAnalyzer.AnalysisResult analysis = analysisCache.GetOrAnalyze(
                         target.mesh,
                         target.submeshIndex,
                         mainTex,
@@ -794,10 +788,15 @@ namespace HairGlossStudio.Editor
                     HairTextureGenerator.SavedTextureSet savedTextures;
                     try
                     {
+                        if (ShouldCancel("ノーマル生成", 0.2f)) break;
                         rawNormal = HairTextureGenerator.GenerateFlowNormalMap(analysis, settings);
+                        if (ShouldCancel("MatCap生成", 0.35f)) break;
                         rawMatCap = HairTextureGenerator.GenerateGlossMatCap(settings, avgBase);
+                        if (ShouldCancel("マスク生成", 0.5f)) break;
                         rawMask = HairTextureGenerator.GenerateGlossMask(analysis, settings);
+                        if (ShouldCancel("接線マップ生成", 0.65f)) break;
                         rawTangent = HairTextureGenerator.GenerateAnisotropyTangentMap(analysis);
+                        if (ShouldCancel("テクスチャ保存・マテリアル適用", 0.8f)) break;
                         savedTextures = HairTextureGenerator.SaveTexturesAsAssets(
                             targetOutputFolder, baseAssetName, rawNormal, rawMatCap, rawMask, rawTangent,
                             settings, ownsAssets ? existingRecord.generatedTexturePaths : null);
@@ -867,11 +866,14 @@ namespace HairGlossStudio.Editor
             }
             finally
             {
+                analysisCache.Clear();
                 Undo.CollapseUndoOperations(undoGroup);
                 EditorUtility.ClearProgressBar();
             }
 
-            statusMessage = $"{appliedCount} 件のマテリアルに非破壊でツヤを適用しました。\n出力先: {targetOutputFolder}";
+            statusMessage = cancelled
+                ? $"キャンセルしました。適用済みの {appliedCount} 件はバックアップとともに保持されます。\n出力先: {targetOutputFolder}"
+                : $"{appliedCount} 件のマテリアルに非破壊でツヤを適用しました。\n出力先: {targetOutputFolder}";
             statusMessageType = MessageType.Info;
         }
 

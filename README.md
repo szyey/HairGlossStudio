@@ -9,19 +9,28 @@ VRChatなどの3Dアバター向けシェーダー **lilToon** が適用され�
    - メインテクスチャ（`_MainTex`）の輝度勾配から2D構造テンソル（Structure Tensor）を算出し、テクスチャ上の実際の毛束・毛筋の向きを自動抽出（読み取り不可設定のテクスチャにも対応）
 2. **プロシージャルテクスチャ自動生成 (`HairTextureGenerator`)**
    - **毛流れ＆毛筋ノーマルマップ**: 抽出した毛流れベクトルに直交する多段階の繊維凹凸を生成
+   - **異方性接線マップ**: 毛筋の凹凸とは独立して毛流れ方向を保存（Bumpが0でも生成）
    - **天使の輪 MatCap**: グロス／マット質感、幅、カーブ（アーチ）、シャープネス、アクセントカラーに対応したカスタムMatCapを生成
    - **ツヤ用マスク**: UVアイランド占有率、根元/毛先フェード、毛束の溝に合わせたマスクを生成
 3. **lilToon パラメータ自動セットアップ (`LilToonMaterialConfigurator`)**
-   - **MatCap**（`1st` / `2nd` 選択可、既存MatCapの自動温存対応）、**異方性反射 (`_UseAnisotropy`)**、**光沢反射 (`_UseReflection`)**、**2ndノーマルマップ (`_UseBump2ndMap`)** を自動設定
+   - **MatCap**（既定は`Auto`）はマテリアルごとに未使用の`1st`、次に`2nd`を選択。両方有効な場合は既存MatCapを保持し、警告してMatCap設定のみスキップ（異方性・ノーマル等は適用）
+   - 詳細設定で`1st` / `2nd`を明示した場合に限り、そのスロットを生成マテリアル上で置き換えます。保存済みの明示スロット設定も引き続き有効です
+   - **異方性反射 (`_UseAnisotropy`)**、**光沢反射 (`_UseReflection`)**、**2ndノーマルマップ (`_UseBump2ndMap`)** を自動設定
    - lilToonのマルチコンパイルキーワードおよびインスペクタユーティリティとも連携
 4. **非破壊適用＆ワンクリック復元 (`HairGlossBackupStore`)**
    - 元のマテリアルは一切書き換えず、複製したマテリアルと生成テクスチャをアサイン
    - `ScriptableObject` によるバックアップ管理で、いつでもワンクリックで元のマテリアルに戻すことが可能
+   - 新規バックアップは`Assets/HairGlossStudio_Generated/HairGlossBackupStore.asset`に保存。従来の出力先にあるバックアップも検索し、出力フォルダ変更後も復元に使用
+   - 同一入力の毛流れ解析を再利用。適用中のキャンセルは処理段階の間で受け付け、適用済みの対象とバックアップは保持（保存・割り当て処理の途中では停止しません）
 5. **リアルタイムプレビュー (`HairGlossPreviewRenderer` / `HairGlossStudioWindow`)**
    - エディタウィンドウ内での合成ヘアプレビュー＆生成テクスチャのサムネイル表示
    - Sceneビューへの一時マテリアルによるリアルタイムプレビュー反映（ウィンドウを閉じると自動復元）
+   - Scene / Prefab保存前、Scene終了時、Play Mode移行前に一時割り当てを解除。保存後は有効だったプレビューを再開
+   - Sceneプレビューの法線はプラットフォームに合わせてインポートするため、一時的に`Assets/HairGlossStudio_Preview*`を作成し、終了時に削除します
 
 ## 導入方法
+
+Unity **2022.3**と、別途インストールした**lilToon**が必要です。
 
 ### 方法1: Unity Package Manager (UPM) から追加
 1. Unityで `Window > Package Manager` を開く
@@ -41,3 +50,11 @@ VRChatなどの3Dアバター向けシェーダー **lilToon** が適用され�
 5. 必要に応じて「Sceneビューにリアルタイムプレビュー反映」で見た目を確認
 6. **「✨ ツヤを適用する（マテリアル複製・非破壊）」** をクリックして完了
 7. 元に戻したい場合は **「↩ 元のマテリアルに戻す」** をクリック
+
+出力フォルダは`Assets/`直下より下の相対パスを指定してください（例:`Assets/HairGlossStudio_Generated`）。絶対パスや`.` / `..`は使用できません。ウィンドウ設定はプロジェクトごとにEditorPrefsへ保存されます。
+
+## テスト
+
+Unity Test Frameworkを導入し、Test RunnerのEditModeで`HairGlossStudio.Editor.Tests`を実行してください。UPM導入時はプロジェクトの`Packages/manifest.json`の`testables`へ`com.nextg.hair-gloss-studio`を追加するとパッケージのテストが有効になります。テストアセンブリはEditor専用で、`UNITY_INCLUDE_TESTS`が定義される場合だけコンパイルされます。
+
+バックアップ照合・Undo、生成アセットの衝突回避、接線マップ、プレビュー復元、出力パス、解析キャッシュ、キャンセル、MatCap空きスロット選択をEditModeテストでカバーします。実際のlilToon描画とプラットフォーム別の見た目はUnityプロジェクトで別途確認してください。
