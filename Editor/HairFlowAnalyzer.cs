@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace HairGlossStudio.Editor
@@ -20,6 +21,51 @@ namespace HairGlossStudio.Editor
             public float[] luminanceMap;
             public Color[] baseColorMap;
             public Color averageBaseColor;
+        }
+
+        public class AnalysisCache
+        {
+            private readonly Dictionary<string, AnalysisResult> results = new Dictionary<string, AnalysisResult>();
+            private readonly Dictionary<string, int> remainingUses = new Dictionary<string, int>();
+
+            public void Retain(string key)
+            {
+                remainingUses.TryGetValue(key, out int count);
+                remainingUses[key] = count + 1;
+            }
+
+            public void Release(string key)
+            {
+                if (!remainingUses.TryGetValue(key, out int count)) return;
+                if (count > 1) remainingUses[key] = count - 1;
+                else
+                {
+                    remainingUses.Remove(key);
+                    results.Remove(key);
+                }
+            }
+
+            public AnalysisResult GetOrAnalyze(Mesh mesh, int submeshIndex, Texture2D mainTex, int resolution, float flowAnalyzeWeight)
+            {
+                string key = GetAnalysisCacheKey(mesh, submeshIndex, mainTex, resolution, flowAnalyzeWeight);
+                if (!results.TryGetValue(key, out AnalysisResult result))
+                {
+                    result = AnalyzeFlowField(mesh, submeshIndex, mainTex, resolution, flowAnalyzeWeight);
+                    results.Add(key, result);
+                }
+                return result;
+            }
+
+            public void Clear()
+            {
+                results.Clear();
+                remainingUses.Clear();
+            }
+        }
+
+        public static string GetAnalysisCacheKey(Mesh mesh, int submeshIndex, Texture2D mainTex, int resolution, float flowAnalyzeWeight)
+        {
+            return FormattableString.Invariant($"{(mesh != null ? mesh.GetInstanceID() : 0)}:{submeshIndex}:{(mainTex != null ? mainTex.GetInstanceID() : 0)}:{Mathf.Clamp(resolution, 64, 2048)}:{flowAnalyzeWeight:R}");
         }
 
         private static readonly float[] GaussianWeights7 =
@@ -87,14 +133,11 @@ namespace HairGlossStudio.Editor
             }
 
             // Compute Structure Tensor from main texture luminance when enabled
-            Vector2[] finalFlow = new Vector2[pixelCount];
+            Vector2[] finalFlow = macroFlow;
             if (mainTex != null && flowAnalyzeWeight > 0.001f)
             {
+                finalFlow = new Vector2[pixelCount];
                 ComputeStructureTensorFlow(size, luminance, macroFlow, flowAnalyzeWeight, finalFlow);
-            }
-            else
-            {
-                Array.Copy(macroFlow, finalFlow, pixelCount);
             }
 
             Color avgColor = ComputeAverageOccupiedColor(baseColors, occupancy);
@@ -127,27 +170,25 @@ namespace HairGlossStudio.Editor
                 return fallback;
             }
 
-            RenderTexture rt = RenderTexture.GetTemporary(
-                targetWidth,
-                targetHeight,
-                0,
-                RenderTextureFormat.ARGB32,
-                RenderTextureReadWrite.sRGB);
-
             RenderTexture prev = RenderTexture.active;
-            Graphics.Blit(source, rt);
-            RenderTexture.active = rt;
-
-            Texture2D readable = new Texture2D(targetWidth, targetHeight, TextureFormat.RGBA32, false, false);
-            readable.ReadPixels(new Rect(0, 0, targetWidth, targetHeight), 0, 0);
-            readable.Apply(false, false);
-
-            RenderTexture.active = prev;
-            RenderTexture.ReleaseTemporary(rt);
-
-            Color[] pixels = readable.GetPixels();
-            UnityEngine.Object.DestroyImmediate(readable);
-            return pixels;
+            RenderTexture rt = null;
+            Texture2D readable = null;
+            try
+            {
+                rt = RenderTexture.GetTemporary(targetWidth, targetHeight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+                Graphics.Blit(source, rt);
+                RenderTexture.active = rt;
+                readable = new Texture2D(targetWidth, targetHeight, TextureFormat.RGBA32, false, false);
+                readable.ReadPixels(new Rect(0, 0, targetWidth, targetHeight), 0, 0);
+                readable.Apply(false, false);
+                return readable.GetPixels();
+            }
+            finally
+            {
+                RenderTexture.active = prev;
+                if (rt != null) RenderTexture.ReleaseTemporary(rt);
+                if (readable != null) UnityEngine.Object.DestroyImmediate(readable);
+            }
         }
 
         private static bool RasterizeMeshFlow(
@@ -359,18 +400,20 @@ namespace HairGlossStudio.Editor
             Vector2[] nextFlow = new Vector2[count];
             float[] nextOcc = new float[count];
             float[] nextRootTip = new float[count];
+            Vector2[] originalFlow = flow;
+            float[] originalOcc = paddedOccupancy;
+            float[] originalRootTip = rootTipMap;
 
             for (int iter = 0; iter < iterations; iter++)
             {
-                Array.Copy(flow, nextFlow, count);
-                Array.Copy(paddedOccupancy, nextOcc, count);
-                Array.Copy(rootTipMap, nextRootTip, count);
-
                 for (int y = 0; y < size; y++)
                 {
                     for (int x = 0; x < size; x++)
                     {
                         int idx = y * size + x;
+                        nextFlow[idx] = flow[idx];
+                        nextOcc[idx] = paddedOccupancy[idx];
+                        nextRootTip[idx] = rootTipMap[idx];
                         if (paddedOccupancy[idx] > 0.5f)
                         {
                             continue;
@@ -409,9 +452,15 @@ namespace HairGlossStudio.Editor
                     }
                 }
 
-                Array.Copy(nextFlow, flow, count);
-                Array.Copy(nextOcc, paddedOccupancy, count);
-                Array.Copy(nextRootTip, rootTipMap, count);
+                (flow, nextFlow) = (nextFlow, flow);
+                (paddedOccupancy, nextOcc) = (nextOcc, paddedOccupancy);
+                (rootTipMap, nextRootTip) = (nextRootTip, rootTipMap);
+            }
+            if (!ReferenceEquals(flow, originalFlow))
+            {
+                Array.Copy(flow, originalFlow, count);
+                Array.Copy(paddedOccupancy, originalOcc, count);
+                Array.Copy(rootTipMap, originalRootTip, count);
             }
         }
 

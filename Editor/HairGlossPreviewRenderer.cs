@@ -1,7 +1,14 @@
 using System;
 using System.Collections.Generic;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.SceneManagement;
+#if UNITY_2021_2_OR_NEWER
+using PrefabStage = UnityEditor.SceneManagement.PrefabStage;
+#else
+using PrefabStage = UnityEditor.Experimental.SceneManagement.PrefabStage;
+#endif
 
 namespace HairGlossStudio.Editor
 {
@@ -19,48 +26,85 @@ namespace HairGlossStudio.Editor
             public Material transientMaterial;
         }
 
+        private class PreviewTextureSet : IDisposable
+        {
+            public Texture2D rawNormal;
+            public Texture2D rawTangent;
+            public Texture2D normal;
+            public Texture2D tangent;
+            public Texture2D matCap;
+            public Texture2D mask;
+            public Color baseColor;
+            public string normalPath;
+            public string tangentPath;
+
+            public void Dispose()
+            {
+                if (rawNormal != null) UnityEngine.Object.DestroyImmediate(rawNormal);
+                if (rawTangent != null) UnityEngine.Object.DestroyImmediate(rawTangent);
+                if (matCap != null) UnityEngine.Object.DestroyImmediate(matCap);
+                if (mask != null) UnityEngine.Object.DestroyImmediate(mask);
+                if (!string.IsNullOrEmpty(normalPath)) AssetDatabase.DeleteAsset(normalPath);
+                if (!string.IsNullOrEmpty(tangentPath)) AssetDatabase.DeleteAsset(tangentPath);
+            }
+        }
+
         private const int PreviewResolution = 256;
 
         private readonly List<ScenePreviewEntry> activeScenePreviews = new List<ScenePreviewEntry>();
 
-        private Mesh cachedMesh;
-        private int cachedSubmesh = -1;
-        private Texture2D cachedMainTex;
-        private float cachedFlowWeight = -1f;
-        private bool cachedAutoAnalyze;
-        private HairFlowAnalyzer.AnalysisResult cachedAnalysis;
-
-        private Texture2D normalPreviewTex;
-        private Texture2D matCapPreviewTex;
-        private Texture2D maskPreviewTex;
+        private readonly HairFlowAnalyzer.AnalysisCache analysisCache = new HairFlowAnalyzer.AnalysisCache();
+        private readonly Dictionary<string, PreviewTextureSet> textureCache = new Dictionary<string, PreviewTextureSet>();
+        private PreviewTextureSet referenceTextures;
+        private string cachedSettings;
+        private float cachedFlowWeight = float.NaN;
+        private string previewFolder;
+        private List<HairMaterialTarget> lastTargets;
+        private HairGlossSettings lastSettings;
+        private bool resumeAfterSave;
+        private bool disposed;
         private Texture2D domePreviewTex;
 
-        public Texture2D NormalPreview => normalPreviewTex;
-        public Texture2D MatCapPreview => matCapPreviewTex;
-        public Texture2D MaskPreview => maskPreviewTex;
+        public Texture2D NormalPreview => referenceTextures?.rawNormal;
+        public Texture2D MatCapPreview => referenceTextures?.matCap;
+        public Texture2D MaskPreview => referenceTextures?.mask;
         public Texture2D DomePreview => domePreviewTex;
         public bool HasActiveScenePreview => activeScenePreviews.Count > 0;
 
         public HairGlossPreviewRenderer()
         {
-            AssemblyReloadEvents.beforeAssemblyReload += ClearScenePreview;
-            EditorApplication.quitting += ClearScenePreview;
+            AssemblyReloadEvents.beforeAssemblyReload += Dispose;
+            EditorApplication.quitting += Dispose;
+            EditorSceneManager.sceneSaving += OnSceneSaving;
+            EditorSceneManager.sceneSaved += OnSceneSaved;
+            EditorSceneManager.sceneClosing += OnSceneClosing;
+            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+            PrefabStage.prefabSaving += OnPrefabSaving;
+            PrefabStage.prefabSaved += OnPrefabSaved;
         }
 
         public void Dispose()
         {
-            AssemblyReloadEvents.beforeAssemblyReload -= ClearScenePreview;
-            EditorApplication.quitting -= ClearScenePreview;
+            if (disposed) return;
+            disposed = true;
+            AssemblyReloadEvents.beforeAssemblyReload -= Dispose;
+            EditorApplication.quitting -= Dispose;
+            EditorSceneManager.sceneSaving -= OnSceneSaving;
+            EditorSceneManager.sceneSaved -= OnSceneSaved;
+            EditorSceneManager.sceneClosing -= OnSceneClosing;
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            PrefabStage.prefabSaving -= OnPrefabSaving;
+            PrefabStage.prefabSaved -= OnPrefabSaved;
+            EditorApplication.delayCall -= ResumeScenePreview;
             ClearScenePreview();
             DestroyPreviewTextures();
+            if (!string.IsNullOrEmpty(previewFolder)) AssetDatabase.DeleteAsset(previewFolder);
         }
 
         public void InvalidateAnalysisCache()
         {
-            cachedAnalysis = null;
-            cachedMesh = null;
-            cachedMainTex = null;
-            cachedSubmesh = -1;
+            analysisCache.Clear();
+            DestroyPreviewTextures();
         }
 
         public void RebuildPreviews(HairMaterialTarget referenceTarget, HairGlossSettings settings)
@@ -70,14 +114,27 @@ namespace HairGlossStudio.Editor
                 return;
             }
 
-            Mesh mesh = referenceTarget != null ? referenceTarget.mesh : null;
-            int submesh = referenceTarget != null ? referenceTarget.submeshIndex : 0;
-            Texture2D mainTex = null;
-            Color baseColor = new Color(0.28f, 0.22f, 0.20f, 1f);
-
             Material baseMat = referenceTarget != null
                 ? (referenceTarget.originalMaterial != null ? referenceTarget.originalMaterial : referenceTarget.currentMaterial)
                 : null;
+            referenceTextures = GetTextureSet(referenceTarget, baseMat, settings);
+            if (domePreviewTex != null) UnityEngine.Object.DestroyImmediate(domePreviewTex);
+            domePreviewTex = RenderSyntheticHairDome(settings, referenceTextures.baseColor, referenceTextures.rawNormal, referenceTextures.matCap);
+            domePreviewTex.hideFlags = HideFlags.HideAndDontSave;
+        }
+
+        private PreviewTextureSet GetTextureSet(HairMaterialTarget target, Material baseMat, HairGlossSettings settings)
+        {
+            string settingsJson = JsonUtility.ToJson(settings);
+            if (cachedSettings != settingsJson)
+            {
+                DestroyPreviewTextures();
+                cachedSettings = settingsJson;
+            }
+            Mesh mesh = target != null ? target.mesh : null;
+            int submesh = target != null ? target.submeshIndex : 0;
+            Texture2D mainTex = null;
+            Color baseColor = new Color(0.28f, 0.22f, 0.20f, 1f);
 
             if (baseMat != null)
             {
@@ -92,50 +149,54 @@ namespace HairGlossStudio.Editor
             }
 
             float flowWeight = settings.autoAnalyzeFlow ? settings.flowAnalyzeWeight : 0f;
-
-            bool needsReanalysis = cachedAnalysis == null
-                                   || cachedMesh != mesh
-                                   || cachedSubmesh != submesh
-                                   || cachedMainTex != mainTex
-                                   || Mathf.Abs(cachedFlowWeight - flowWeight) > 0.001f
-                                   || cachedAutoAnalyze != settings.autoAnalyzeFlow;
-
-            if (needsReanalysis)
+            if (cachedFlowWeight != flowWeight)
             {
-                cachedAnalysis = HairFlowAnalyzer.AnalyzeFlowField(
-                    mesh,
-                    submesh,
-                    mainTex,
-                    PreviewResolution,
-                    flowWeight);
-                cachedMesh = mesh;
-                cachedSubmesh = submesh;
-                cachedMainTex = mainTex;
+                analysisCache.Clear();
                 cachedFlowWeight = flowWeight;
-                cachedAutoAnalyze = settings.autoAnalyzeFlow;
             }
+            string analysisKey = HairFlowAnalyzer.GetAnalysisCacheKey(mesh, submesh, mainTex, PreviewResolution, flowWeight);
+            string textureKey = $"{analysisKey}:{baseColor.r:R}:{baseColor.g:R}:{baseColor.b:R}";
+            if (textureCache.TryGetValue(textureKey, out PreviewTextureSet cached)) return cached;
+            HairFlowAnalyzer.AnalysisResult analysis = analysisCache.GetOrAnalyze(mesh, submesh, mainTex, PreviewResolution, flowWeight);
+            var textures = new PreviewTextureSet();
+            try
+            {
+                textures.baseColor = new Color(analysis.averageBaseColor.r * baseColor.r,
+                    analysis.averageBaseColor.g * baseColor.g, analysis.averageBaseColor.b * baseColor.b, 1f);
+                textures.rawNormal = HairTextureGenerator.GenerateFlowNormalMap(analysis, settings);
+                textures.rawNormal.hideFlags = HideFlags.HideAndDontSave;
+                textures.matCap = HairTextureGenerator.GenerateGlossMatCap(settings, textures.baseColor, PreviewResolution);
+                textures.matCap.hideFlags = HideFlags.HideAndDontSave;
+                textures.mask = HairTextureGenerator.GenerateGlossMask(analysis, settings);
+                textures.mask.hideFlags = HideFlags.HideAndDontSave;
+                textures.rawTangent = HairTextureGenerator.GenerateAnisotropyTangentMap(analysis);
+                textures.rawTangent.hideFlags = HideFlags.HideAndDontSave;
+                textureCache.Add(textureKey, textures);
+                return textures;
+            }
+            catch
+            {
+                textures.Dispose();
+                throw;
+            }
+        }
 
-            DestroyPreviewTextures();
-
-            normalPreviewTex = HairTextureGenerator.GenerateFlowNormalMap(cachedAnalysis, settings);
-            normalPreviewTex.hideFlags = HideFlags.HideAndDontSave;
-
-            Color avgBase = cachedAnalysis != null
-                ? new Color(
-                    cachedAnalysis.averageBaseColor.r * baseColor.r,
-                    cachedAnalysis.averageBaseColor.g * baseColor.g,
-                    cachedAnalysis.averageBaseColor.b * baseColor.b,
-                    1f)
-                : baseColor;
-
-            matCapPreviewTex = HairTextureGenerator.GenerateGlossMatCap(settings, avgBase, PreviewResolution);
-            matCapPreviewTex.hideFlags = HideFlags.HideAndDontSave;
-
-            maskPreviewTex = HairTextureGenerator.GenerateGlossMask(cachedAnalysis, settings);
-            maskPreviewTex.hideFlags = HideFlags.HideAndDontSave;
-
-            domePreviewTex = RenderSyntheticHairDome(settings, avgBase, normalPreviewTex, matCapPreviewTex);
-            domePreviewTex.hideFlags = HideFlags.HideAndDontSave;
+        private void ImportSceneNormals(PreviewTextureSet textures)
+        {
+            if (textures.normal != null && textures.tangent != null) return;
+            if (string.IsNullOrEmpty(previewFolder))
+            {
+                previewFolder = AssetDatabase.GenerateUniqueAssetPath("Assets/HairGlossStudio_Preview");
+                HairTextureGenerator.EnsureFolderExists(previewFolder);
+            }
+            if (string.IsNullOrEmpty(textures.normalPath))
+            {
+                string id = Guid.NewGuid().ToString("N");
+                textures.normalPath = $"{previewFolder}/{id}_Normal.png";
+                textures.tangentPath = $"{previewFolder}/{id}_Tangent.png";
+            }
+            textures.normal = HairTextureGenerator.ImportPreviewNormal(textures.normalPath, textures.rawNormal);
+            textures.tangent = HairTextureGenerator.ImportPreviewNormal(textures.tangentPath, textures.rawTangent);
         }
 
         public void UpdateScenePreview(
@@ -143,17 +204,14 @@ namespace HairGlossStudio.Editor
             HairGlossSettings settings,
             HairGlossBackupStore backupStore)
         {
-            if (targets == null || settings == null)
+            if (disposed || targets == null || settings == null || EditorApplication.isPlayingOrWillChangePlaymode)
             {
                 ClearScenePreview();
                 return;
             }
 
-            if (normalPreviewTex == null || matCapPreviewTex == null || maskPreviewTex == null)
-            {
-                HairMaterialTarget firstSelected = FindFirstSelectedLilToon(targets);
-                RebuildPreviews(firstSelected, settings);
-            }
+            lastTargets = new List<HairMaterialTarget>(targets);
+            lastSettings = settings.Clone();
 
             // Build lookup of currently active previewed slots
             var desiredKeys = new HashSet<string>();
@@ -173,6 +231,8 @@ namespace HairGlossStudio.Editor
                 {
                     continue;
                 }
+                PreviewTextureSet textures = GetTextureSet(t, sourceMat, settings);
+                ImportSceneNormals(textures);
 
                 if (existing == null)
                 {
@@ -220,9 +280,11 @@ namespace HairGlossStudio.Editor
                 LilToonMaterialConfigurator.ConfigureMaterial(
                     existing.transientMaterial,
                     settings,
-                    normalPreviewTex,
-                    matCapPreviewTex,
-                    maskPreviewTex);
+                    textures.normal,
+                    textures.matCap,
+                    textures.mask,
+                    textures.tangent,
+                    false);
             }
 
             // Revert any entries no longer selected
@@ -241,6 +303,8 @@ namespace HairGlossStudio.Editor
 
         public void ClearScenePreview()
         {
+            resumeAfterSave = false;
+            EditorApplication.delayCall -= ResumeScenePreview;
             if (activeScenePreviews.Count == 0)
             {
                 return;
@@ -252,6 +316,38 @@ namespace HairGlossStudio.Editor
             }
             activeScenePreviews.Clear();
             SceneView.RepaintAll();
+        }
+
+        private void SuspendForSave()
+        {
+            bool wasActive = HasActiveScenePreview || resumeAfterSave;
+            ClearScenePreview();
+            resumeAfterSave = wasActive;
+        }
+
+        private void OnSceneSaving(Scene scene, string path) { SuspendForSave(); }
+        private void OnPrefabSaving(GameObject root) { SuspendForSave(); }
+        private void OnSceneSaved(Scene scene) { QueueResume(); }
+        private void OnPrefabSaved(GameObject root) { QueueResume(); }
+        private void OnSceneClosing(Scene scene, bool removingScene) { ClearScenePreview(); }
+
+        private void OnPlayModeStateChanged(PlayModeStateChange state)
+        {
+            if (state == PlayModeStateChange.ExitingEditMode) ClearScenePreview();
+        }
+
+        private void QueueResume()
+        {
+            if (!resumeAfterSave) return;
+            EditorApplication.delayCall -= ResumeScenePreview;
+            EditorApplication.delayCall += ResumeScenePreview;
+        }
+
+        private void ResumeScenePreview()
+        {
+            if (!resumeAfterSave || disposed || EditorApplication.isPlayingOrWillChangePlaymode) return;
+            resumeAfterSave = false;
+            UpdateScenePreview(lastTargets, lastSettings, null);
         }
 
         public void DetachScenePreviewWithoutRestore()
@@ -271,6 +367,7 @@ namespace HairGlossStudio.Editor
             HairGlossBackupStore backupStore,
             ScenePreviewEntry existing)
         {
+            backupStore = HairGlossBackupStore.FindForTarget(target.renderer, target.submeshIndex);
             if (backupStore != null &&
                 backupStore.TryGetRecord(target.renderer, target.submeshIndex, out RendererMaterialRecord rec) &&
                 rec.originalMaterial != null)
@@ -288,10 +385,11 @@ namespace HairGlossStudio.Editor
 
         private static void RestoreEntry(ScenePreviewEntry entry)
         {
-            if (entry.renderer != null && entry.restoreMaterial != null)
+            if (entry.renderer != null)
             {
                 Material[] mats = entry.renderer.sharedMaterials;
-                if (mats != null && entry.submeshIndex >= 0 && entry.submeshIndex < mats.Length)
+                if (mats != null && entry.submeshIndex >= 0 && entry.submeshIndex < mats.Length &&
+                    mats[entry.submeshIndex] == entry.transientMaterial)
                 {
                     mats[entry.submeshIndex] = entry.restoreMaterial;
                     entry.renderer.sharedMaterials = mats;
@@ -340,7 +438,6 @@ namespace HairGlossStudio.Editor
             Texture2D matCapTex)
         {
             const int size = PreviewResolution;
-            Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false, false);
             Color[] pixels = new Color[size * size];
 
             Color[] normalPixels = normalMap != null ? normalMap.GetPixels() : null;
@@ -409,7 +506,7 @@ namespace HairGlossStudio.Editor
 
                     // Toon shading base
                     float ndl = Vector3.Dot(normal, lightDir);
-                    float shadowFactor = Mathf.SmoothStep(-0.15f, 0.25f, ndl);
+                    float shadowFactor = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(-0.15f, 0.25f, ndl));
                     Color shadedBase = Color.Lerp(hairAlbedo * 0.52f, hairAlbedo, shadowFactor);
 
                     // Procedural strand variation on base hair
@@ -474,7 +571,7 @@ namespace HairGlossStudio.Editor
 
                     // Anti-aliased outer sphere edge
                     float r = Mathf.Sqrt(r2);
-                    float alphaEdge = Mathf.SmoothStep(0.92f, 0.89f, r);
+                    float alphaEdge = 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.89f, 0.92f, r));
                     pixels[row + px] = Color.Lerp(bgColor, new Color(
                         Mathf.Clamp01(combined.r),
                         Mathf.Clamp01(combined.g),
@@ -483,20 +580,26 @@ namespace HairGlossStudio.Editor
                 }
             }
 
-            tex.SetPixels(pixels);
-            tex.Apply(false, false);
-            return tex;
+            Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false, false);
+            try
+            {
+                tex.SetPixels(pixels);
+                tex.Apply(false, false);
+                return tex;
+            }
+            catch
+            {
+                UnityEngine.Object.DestroyImmediate(tex);
+                throw;
+            }
         }
 
         private void DestroyPreviewTextures()
         {
-            if (normalPreviewTex != null) UnityEngine.Object.DestroyImmediate(normalPreviewTex);
-            if (matCapPreviewTex != null) UnityEngine.Object.DestroyImmediate(matCapPreviewTex);
-            if (maskPreviewTex != null) UnityEngine.Object.DestroyImmediate(maskPreviewTex);
+            foreach (PreviewTextureSet textures in textureCache.Values) textures.Dispose();
+            textureCache.Clear();
+            referenceTextures = null;
             if (domePreviewTex != null) UnityEngine.Object.DestroyImmediate(domePreviewTex);
-            normalPreviewTex = null;
-            matCapPreviewTex = null;
-            maskPreviewTex = null;
             domePreviewTex = null;
         }
     }

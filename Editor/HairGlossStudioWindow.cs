@@ -30,6 +30,7 @@ namespace HairGlossStudio.Editor
         private HairGlossBackupStore backupStore;
         private string statusMessage;
         private MessageType statusMessageType = MessageType.Info;
+        private static string SettingsKey => $"HairGlossStudio.Settings.{Application.dataPath}";
 
         [MenuItem("Tools/Hair Gloss Studio (髪のツヤ設定)", false, 100)]
         [MenuItem("Tools/Chill-Bell Style/Hair Gloss Studio (髪のツヤ設定)", false, 100)]
@@ -42,6 +43,12 @@ namespace HairGlossStudio.Editor
 
         private void OnEnable()
         {
+            string savedSettings = EditorPrefs.GetString(SettingsKey, string.Empty);
+            if (!string.IsNullOrEmpty(savedSettings))
+            {
+                try { settings = JsonUtility.FromJson<HairGlossSettings>(savedSettings); }
+                catch (ArgumentException) { settings = new HairGlossSettings(); }
+            }
             if (settings == null)
             {
                 settings = new HairGlossSettings();
@@ -65,6 +72,7 @@ namespace HairGlossStudio.Editor
 
         private void OnDisable()
         {
+            EditorPrefs.SetString(SettingsKey, JsonUtility.ToJson(settings));
             if (previewRenderer != null)
             {
                 previewRenderer.Dispose();
@@ -95,6 +103,7 @@ namespace HairGlossStudio.Editor
 
             if (settingsChanged)
             {
+                EditorPrefs.SetString(SettingsKey, JsonUtility.ToJson(settings));
                 RebuildPreviewTextures();
                 if (liveScenePreview)
                 {
@@ -194,21 +203,19 @@ namespace HairGlossStudio.Editor
                 }
 
                 int selectedLilCount = 0;
-                bool hasExistingMatCap1st = false;
-                HairGlossBackupStore existingStore = GetBackupStoreIfExists();
+                bool hasMatCapConflict = false;
 
                 foreach (HairMaterialTarget t in targets)
                 {
                     if (t.isSelected && t.isLilToon)
                     {
                         selectedLilCount++;
-                        Material baseMat = existingStore != null
-                            ? existingStore.GetOriginalMaterial(t.renderer, t.submeshIndex)
+                        HairGlossBackupStore targetStore = HairGlossBackupStore.FindForTarget(t.renderer, t.submeshIndex);
+                        Material baseMat = targetStore != null
+                            ? targetStore.GetOriginalMaterial(t.renderer, t.submeshIndex)
                             : t.originalMaterial;
-                        if (LilToonMaterialConfigurator.IsMatCap1stActive(baseMat))
-                        {
-                            hasExistingMatCap1st = true;
-                        }
+                        if (!LilToonMaterialConfigurator.TryResolveMatCapSlot(baseMat, MatCapSlotMode.Auto, out _))
+                            hasMatCapConflict = true;
                     }
                 }
 
@@ -261,8 +268,7 @@ namespace HairGlossStudio.Editor
                             GUI.color = t.isLilToon ? new Color(0.65f, 1f, 0.72f) : new Color(1f, 0.65f, 0.55f);
                             GUILayout.Label(shaderTag, EditorStyles.miniButton, GUILayout.Width(56));
 
-                            bool hasBackup = existingStore != null &&
-                                             existingStore.TryGetRecord(t.renderer, t.submeshIndex, out _);
+                            bool hasBackup = HairGlossBackupStore.FindForTarget(t.renderer, t.submeshIndex) != null;
                             GUI.color = hasBackup ? new Color(0.65f, 0.85f, 1f) : new Color(0.85f, 0.85f, 0.85f);
                             GUILayout.Label(hasBackup ? "適用済み" : "オリジナル", EditorStyles.miniButton, GUILayout.Width(64));
                             GUI.color = prevColor;
@@ -270,23 +276,13 @@ namespace HairGlossStudio.Editor
                     }
                 }
 
-                if (hasExistingMatCap1st && settings.matCapSlot == MatCapSlotMode.MatCap1st)
+                if (hasMatCapConflict && settings.matCapSlot == MatCapSlotMode.Auto)
                 {
-                    using (new EditorGUILayout.HorizontalScope(EditorStyles.helpBox))
-                    {
-                        EditorGUILayout.LabelField(
-                            "元マテリアルで MatCap 1st が有効です。上書きを避ける場合は MatCap 2nd を推奨します。",
-                            EditorStyles.wordWrappedMiniLabel);
-                        if (GUILayout.Button("MatCap 2ndに切替", GUILayout.Width(115), GUILayout.Height(28)))
-                        {
-                            settings.matCapSlot = MatCapSlotMode.MatCap2nd;
-                            RebuildPreviewTextures();
-                            if (liveScenePreview)
-                            {
-                                previewRenderer.UpdateScenePreview(targets, settings, existingStore);
-                            }
-                        }
-                    }
+                    EditorGUILayout.HelpBox("空きMatCapスロットがない対象は、既存MatCapを保持してMatCap設定のみスキップします。置き換える場合は詳細設定で1st/2ndを明示してください。", MessageType.Warning);
+                }
+                else if (settings.matCapSlot != MatCapSlotMode.Auto)
+                {
+                    EditorGUILayout.HelpBox("MatCapスロットを明示指定しています。選択したスロットの既存設定は生成マテリアルで置き換えられます。既存設定を保持する場合はAutoを選択してください。", MessageType.Info);
                 }
             }
         }
@@ -498,6 +494,7 @@ namespace HairGlossStudio.Editor
                         settings.textureResolution = ResolutionValues[nextResIdx];
 
                         settings.matCapSlot = (MatCapSlotMode)EditorGUILayout.EnumPopup("使用 MatCap スロット", settings.matCapSlot);
+                        EditorGUILayout.LabelField("Auto: 空き1st → 空き2nd。両方使用中はMatCapのみスキップ。", EditorStyles.wordWrappedMiniLabel);
                         settings.matCapBlendMode = EditorGUILayout.Popup("MatCap 合成モード", settings.matCapBlendMode, BlendModeLabels);
                         settings.matCapNormalStrength = EditorGUILayout.Slider("MatCap ノーマル強度", settings.matCapNormalStrength, 0f, 2f);
 
@@ -622,10 +619,10 @@ namespace HairGlossStudio.Editor
 
             targets.AddRange(HairTargetDetector.DetectTargets(targetRoot, includeAllRenderers));
 
-            HairGlossBackupStore store = GetBackupStoreIfExists();
-            if (store != null)
+            foreach (HairMaterialTarget t in targets)
             {
-                foreach (HairMaterialTarget t in targets)
+                HairGlossBackupStore store = HairGlossBackupStore.FindForTarget(t.renderer, t.submeshIndex);
+                if (store != null)
                 {
                     if (store.TryGetRecord(t.renderer, t.submeshIndex, out RendererMaterialRecord rec) &&
                         rec.originalMaterial != null)
@@ -673,10 +670,17 @@ namespace HairGlossStudio.Editor
             previewRenderer.RebuildPreviews(reference, settings);
         }
 
-        private void ApplyGlossToSelectedTargets()
+        private void ApplyGlossToSelectedTargets(Func<string, float, bool> cancel = null)
         {
             if (targetRoot == null)
             {
+                return;
+            }
+
+            if (!HairTextureGenerator.TryNormalizeOutputFolder(settings.outputFolder, out string rootFolder, out string folderError))
+            {
+                statusMessage = folderError;
+                statusMessageType = MessageType.Error;
                 return;
             }
 
@@ -700,26 +704,61 @@ namespace HairGlossStudio.Editor
                 return;
             }
 
-            string rootFolder = string.IsNullOrWhiteSpace(settings.outputFolder)
-                ? "Assets/HairGlossStudio_Generated"
-                : settings.outputFolder.Replace('\\', '/').TrimEnd('/');
+            foreach (HairMaterialTarget target in selected)
+            {
+                HairGlossBackupStore.FindForTarget(target.renderer, target.submeshIndex, out bool ambiguous);
+                if (ambiguous)
+                {
+                    statusMessage = "複数のバックアップが対象に一致するため、適用を中止しました。バックアップを確認してください。";
+                    statusMessageType = MessageType.Error;
+                    return;
+                }
+            }
 
             string avatarFolderName = HairTextureGenerator.SanitizeFileName(targetRoot.name);
             string targetOutputFolder = $"{rootFolder}/{avatarFolderName}";
-            HairTextureGenerator.EnsureFolderExists(targetOutputFolder);
-
-            HairGlossBackupStore store = HairGlossBackupStore.LoadOrCreate($"{rootFolder}/HairGlossBackupStore.asset");
+            HairGlossBackupStore defaultStore;
+            try
+            {
+                HairTextureGenerator.EnsureFolderExists(targetOutputFolder);
+                defaultStore = HairGlossBackupStore.LoadOrCreate();
+            }
+            catch (Exception exception) when (exception is ArgumentException || exception is IOException || exception is UnauthorizedAccessException)
+            {
+                statusMessage = exception.Message;
+                statusMessageType = MessageType.Error;
+                return;
+            }
             int appliedCount = 0;
+            bool cancelled = false;
+            var analysisCache = new HairFlowAnalyzer.AnalysisCache();
+            float flowWeight = settings.autoAnalyzeFlow ? settings.flowAnalyzeWeight : 0f;
+            foreach (HairMaterialTarget target in selected)
+            {
+                HairGlossBackupStore store = HairGlossBackupStore.FindForTarget(target.renderer, target.submeshIndex) ?? defaultStore;
+                Material originalMat = store.GetOriginalMaterial(target.renderer, target.submeshIndex);
+                if (originalMat == null) continue;
+                Texture2D mainTex = originalMat.HasProperty("_MainTex") ? originalMat.GetTexture("_MainTex") as Texture2D : null;
+                analysisCache.Retain(HairFlowAnalyzer.GetAnalysisCacheKey(target.mesh, target.submeshIndex, mainTex, settings.textureResolution, flowWeight));
+            }
+            if (cancel == null)
+                cancel = (message, progress) => EditorUtility.DisplayCancelableProgressBar("Hair Gloss Studio", message, progress);
+            Undo.IncrementCurrentGroup();
+            int undoGroup = Undo.GetCurrentGroup();
+            Undo.SetCurrentGroupName("Apply Hair Gloss Studio");
 
             try
             {
                 for (int i = 0; i < selected.Count; i++)
                 {
                     HairMaterialTarget target = selected[i];
-                    EditorUtility.DisplayProgressBar(
-                        "Hair Gloss Studio",
-                        $"毛流れ解析・ツヤ生成中 ({i + 1}/{selected.Count}): {target.DisplayName}",
-                        (float)i / selected.Count);
+                    HairGlossBackupStore store = HairGlossBackupStore.FindForTarget(target.renderer, target.submeshIndex) ?? defaultStore;
+                    bool ShouldCancel(string stage, float fraction)
+                    {
+                        cancelled = cancel($"{stage} ({i + 1}/{selected.Count}): {target.DisplayName}", (i + fraction) / selected.Count);
+                        return cancelled;
+                    }
+                    if (ShouldCancel("毛流れ解析", 0f)) break;
 
                     Material originalMat = store.GetOriginalMaterial(target.renderer, target.submeshIndex);
                     if (originalMat == null)
@@ -734,8 +773,8 @@ namespace HairGlossStudio.Editor
                         ? originalMat.GetColor("_Color")
                         : Color.white;
 
-                    float flowWeight = settings.autoAnalyzeFlow ? settings.flowAnalyzeWeight : 0f;
-                    HairFlowAnalyzer.AnalysisResult analysis = HairFlowAnalyzer.AnalyzeFlowField(
+                    string analysisKey = HairFlowAnalyzer.GetAnalysisCacheKey(target.mesh, target.submeshIndex, mainTex, settings.textureResolution, flowWeight);
+                    HairFlowAnalyzer.AnalysisResult analysis = analysisCache.GetOrAnalyze(
                         target.mesh,
                         target.submeshIndex,
                         mainTex,
@@ -748,26 +787,42 @@ namespace HairGlossStudio.Editor
                         analysis.averageBaseColor.b * baseColor.b,
                         1f);
 
-                    Texture2D rawNormal = HairTextureGenerator.GenerateFlowNormalMap(analysis, settings);
-                    Texture2D rawMatCap = HairTextureGenerator.GenerateGlossMatCap(settings, avgBase);
-                    Texture2D rawMask = HairTextureGenerator.GenerateGlossMask(analysis, settings);
-
                     string baseAssetName = $"{originalMat.name}_{target.renderer.name}_S{target.submeshIndex}";
-                    HairTextureGenerator.SavedTextureSet savedTextures = HairTextureGenerator.SaveTexturesAsAssets(
-                        targetOutputFolder,
-                        baseAssetName,
-                        rawNormal,
-                        rawMatCap,
-                        rawMask,
-                        settings);
+                    bool ownsAssets = store.OwnsGeneratedAssets(target.renderer, target.submeshIndex, targetOutputFolder);
+                    store.TryGetRecord(target.renderer, target.submeshIndex, out RendererMaterialRecord existingRecord);
+                    Texture2D rawNormal = null;
+                    Texture2D rawMatCap = null;
+                    Texture2D rawMask = null;
+                    Texture2D rawTangent = null;
+                    HairTextureGenerator.SavedTextureSet savedTextures;
+                    try
+                    {
+                        if (ShouldCancel("ノーマル生成", 0.2f)) break;
+                        rawNormal = HairTextureGenerator.GenerateFlowNormalMap(analysis, settings);
+                        if (ShouldCancel("MatCap生成", 0.35f)) break;
+                        rawMatCap = HairTextureGenerator.GenerateGlossMatCap(settings, avgBase);
+                        if (ShouldCancel("マスク生成", 0.5f)) break;
+                        rawMask = HairTextureGenerator.GenerateGlossMask(analysis, settings);
+                        if (ShouldCancel("接線マップ生成", 0.65f)) break;
+                        rawTangent = HairTextureGenerator.GenerateAnisotropyTangentMap(analysis);
+                        if (ShouldCancel("テクスチャ保存・マテリアル適用", 0.8f)) break;
+                        savedTextures = HairTextureGenerator.SaveTexturesAsAssets(
+                            targetOutputFolder, baseAssetName, rawNormal, rawMatCap, rawMask, rawTangent,
+                            settings, ownsAssets ? existingRecord.generatedTexturePaths : null);
+                    }
+                    finally
+                    {
+                        if (rawNormal != null) DestroyImmediate(rawNormal);
+                        if (rawMatCap != null) DestroyImmediate(rawMatCap);
+                        if (rawMask != null) DestroyImmediate(rawMask);
+                        if (rawTangent != null) DestroyImmediate(rawTangent);
+                        analysisCache.Release(analysisKey);
+                        analysis = null;
+                    }
 
-                    DestroyImmediate(rawNormal);
-                    DestroyImmediate(rawMatCap);
-                    DestroyImmediate(rawMask);
-
-                    string matAssetPath = Path.Combine(
+                    string matAssetPath = ownsAssets ? AssetDatabase.GetAssetPath(existingRecord.generatedMaterial) : AssetDatabase.GenerateUniqueAssetPath(Path.Combine(
                         targetOutputFolder,
-                        $"{HairTextureGenerator.SanitizeFileName(baseAssetName)}_HairGloss.mat").Replace('\\', '/');
+                        $"{HairTextureGenerator.SanitizeFileName(baseAssetName)}_HairGloss.mat").Replace('\\', '/'));
 
                     Material clonedMat = AssetDatabase.LoadAssetAtPath<Material>(matAssetPath);
                     if (clonedMat == null)
@@ -786,7 +841,8 @@ namespace HairGlossStudio.Editor
                         settings,
                         savedTextures.normalMap,
                         savedTextures.matCap,
-                        savedTextures.mask);
+                        savedTextures.mask,
+                        savedTextures.tangentMap);
 
                     Material[] sharedMats = target.renderer.sharedMaterials;
                     if (sharedMats != null && target.submeshIndex >= 0 && target.submeshIndex < sharedMats.Length)
@@ -794,6 +850,7 @@ namespace HairGlossStudio.Editor
                         Undo.RecordObject(target.renderer, "Apply Hair Gloss Studio");
                         sharedMats[target.submeshIndex] = clonedMat;
                         target.renderer.sharedMaterials = sharedMats;
+                        PrefabUtility.RecordPrefabInstancePropertyModifications(target.renderer);
                         EditorUtility.SetDirty(target.renderer);
 
                         store.RegisterBackup(
@@ -805,7 +862,8 @@ namespace HairGlossStudio.Editor
                             {
                                 savedTextures.normalMapPath,
                                 savedTextures.matCapPath,
-                                savedTextures.maskPath
+                                savedTextures.maskPath,
+                                savedTextures.tangentMapPath
                             });
 
                         target.originalMaterial = originalMat;
@@ -819,10 +877,14 @@ namespace HairGlossStudio.Editor
             }
             finally
             {
+                analysisCache.Clear();
+                Undo.CollapseUndoOperations(undoGroup);
                 EditorUtility.ClearProgressBar();
             }
 
-            statusMessage = $"{appliedCount} 件のマテリアルに非破壊でツヤを適用しました。\n出力先: {targetOutputFolder}";
+            statusMessage = cancelled
+                ? $"キャンセルしました。適用済みの {appliedCount} 件はバックアップとともに保持されます。\n出力先: {targetOutputFolder}"
+                : $"{appliedCount} 件のマテリアルに非破壊でツヤを適用しました。\n出力先: {targetOutputFolder}";
             statusMessageType = MessageType.Info;
         }
 
@@ -836,8 +898,22 @@ namespace HairGlossStudio.Editor
                 return;
             }
 
-            HairGlossBackupStore store = GetBackupStoreIfExists();
-            int restored = store != null ? store.RestoreAllUnderRoot(targetRoot, false) : 0;
+            Undo.IncrementCurrentGroup();
+            int undoGroup = Undo.GetCurrentGroup();
+            Undo.SetCurrentGroupName("Revert Hair Gloss Studio");
+            int restored = 0;
+            try
+            {
+                foreach (Renderer renderer in targetRoot.GetComponentsInChildren<Renderer>(true))
+                {
+                    for (int i = 0; i < renderer.sharedMaterials.Length; i++)
+                    {
+                        HairGlossBackupStore store = HairGlossBackupStore.FindForTarget(renderer, i);
+                        if (store != null && store.RestoreTarget(renderer, i)) restored++;
+                    }
+                }
+            }
+            finally { Undo.CollapseUndoOperations(undoGroup); }
 
             LoadTargets();
             statusMessage = restored > 0
@@ -848,15 +924,18 @@ namespace HairGlossStudio.Editor
 
         private HairGlossBackupStore GetBackupStoreIfExists()
         {
-            string rootFolder = string.IsNullOrWhiteSpace(settings.outputFolder)
-                ? "Assets/HairGlossStudio_Generated"
-                : settings.outputFolder.Replace('\\', '/').TrimEnd('/');
-
-            string storePath = $"{rootFolder}/HairGlossBackupStore.asset";
-            if (backupStore == null || AssetDatabase.GetAssetPath(backupStore) != storePath)
+            if (targetRoot != null)
             {
-                backupStore = AssetDatabase.LoadAssetAtPath<HairGlossBackupStore>(storePath);
+                foreach (Renderer renderer in targetRoot.GetComponentsInChildren<Renderer>(true))
+                {
+                    for (int i = 0; i < renderer.sharedMaterials.Length; i++)
+                    {
+                        HairGlossBackupStore store = HairGlossBackupStore.FindForTarget(renderer, i);
+                        if (store != null) return store;
+                    }
+                }
             }
+            backupStore = AssetDatabase.LoadAssetAtPath<HairGlossBackupStore>(HairGlossBackupStore.DefaultStoreAssetPath);
             return backupStore;
         }
     }
