@@ -43,6 +43,31 @@ namespace HairGlossStudio.Editor.Tests
             }
         }
 
+        [Test]
+        public void CountedAnalysisIsEvictedAfterItsLastUse()
+        {
+            var cache = new HairFlowAnalyzer.AnalysisCache();
+            string firstKey = HairFlowAnalyzer.GetAnalysisCacheKey(null, 0, null, 64, 0f);
+            string secondKey = HairFlowAnalyzer.GetAnalysisCacheKey(null, 1, null, 64, 0f);
+            cache.Retain(firstKey);
+            cache.Retain(secondKey);
+            cache.Retain(firstKey);
+            var first = cache.GetOrAnalyze(null, 0, null, 64, 0f);
+            var second = cache.GetOrAnalyze(null, 1, null, 64, 0f);
+            cache.Release(firstKey);
+            Assert.AreSame(first, cache.GetOrAnalyze(null, 0, null, 64, 0f));
+            cache.Release(secondKey);
+            Assert.AreNotSame(second, cache.GetOrAnalyze(null, 1, null, 64, 0f));
+            cache.Release(firstKey);
+            Assert.AreNotSame(first, cache.GetOrAnalyze(null, 0, null, 64, 0f));
+            cache.Retain(firstKey);
+            cache.Clear();
+            cache.Retain(firstKey);
+            first = cache.GetOrAnalyze(null, 0, null, 64, 0f);
+            cache.Release(firstKey);
+            Assert.AreNotSame(first, cache.GetOrAnalyze(null, 0, null, 64, 0f));
+        }
+
         [TestCase(0)]
         [TestCase(1)]
         [TestCase(2)]

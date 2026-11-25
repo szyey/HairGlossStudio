@@ -26,6 +26,24 @@ namespace HairGlossStudio.Editor
         public class AnalysisCache
         {
             private readonly Dictionary<string, AnalysisResult> results = new Dictionary<string, AnalysisResult>();
+            private readonly Dictionary<string, int> remainingUses = new Dictionary<string, int>();
+
+            public void Retain(string key)
+            {
+                remainingUses.TryGetValue(key, out int count);
+                remainingUses[key] = count + 1;
+            }
+
+            public void Release(string key)
+            {
+                if (!remainingUses.TryGetValue(key, out int count)) return;
+                if (count > 1) remainingUses[key] = count - 1;
+                else
+                {
+                    remainingUses.Remove(key);
+                    results.Remove(key);
+                }
+            }
 
             public AnalysisResult GetOrAnalyze(Mesh mesh, int submeshIndex, Texture2D mainTex, int resolution, float flowAnalyzeWeight)
             {
@@ -38,7 +56,11 @@ namespace HairGlossStudio.Editor
                 return result;
             }
 
-            public void Clear() { results.Clear(); }
+            public void Clear()
+            {
+                results.Clear();
+                remainingUses.Clear();
+            }
         }
 
         public static string GetAnalysisCacheKey(Mesh mesh, int submeshIndex, Texture2D mainTex, int resolution, float flowAnalyzeWeight)

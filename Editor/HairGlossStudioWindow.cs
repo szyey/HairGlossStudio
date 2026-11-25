@@ -732,6 +732,15 @@ namespace HairGlossStudio.Editor
             int appliedCount = 0;
             bool cancelled = false;
             var analysisCache = new HairFlowAnalyzer.AnalysisCache();
+            float flowWeight = settings.autoAnalyzeFlow ? settings.flowAnalyzeWeight : 0f;
+            foreach (HairMaterialTarget target in selected)
+            {
+                HairGlossBackupStore store = HairGlossBackupStore.FindForTarget(target.renderer, target.submeshIndex) ?? defaultStore;
+                Material originalMat = store.GetOriginalMaterial(target.renderer, target.submeshIndex);
+                if (originalMat == null) continue;
+                Texture2D mainTex = originalMat.HasProperty("_MainTex") ? originalMat.GetTexture("_MainTex") as Texture2D : null;
+                analysisCache.Retain(HairFlowAnalyzer.GetAnalysisCacheKey(target.mesh, target.submeshIndex, mainTex, settings.textureResolution, flowWeight));
+            }
             if (cancel == null)
                 cancel = (message, progress) => EditorUtility.DisplayCancelableProgressBar("Hair Gloss Studio", message, progress);
             Undo.IncrementCurrentGroup();
@@ -764,7 +773,7 @@ namespace HairGlossStudio.Editor
                         ? originalMat.GetColor("_Color")
                         : Color.white;
 
-                    float flowWeight = settings.autoAnalyzeFlow ? settings.flowAnalyzeWeight : 0f;
+                    string analysisKey = HairFlowAnalyzer.GetAnalysisCacheKey(target.mesh, target.submeshIndex, mainTex, settings.textureResolution, flowWeight);
                     HairFlowAnalyzer.AnalysisResult analysis = analysisCache.GetOrAnalyze(
                         target.mesh,
                         target.submeshIndex,
@@ -807,6 +816,8 @@ namespace HairGlossStudio.Editor
                         if (rawMatCap != null) DestroyImmediate(rawMatCap);
                         if (rawMask != null) DestroyImmediate(rawMask);
                         if (rawTangent != null) DestroyImmediate(rawTangent);
+                        analysisCache.Release(analysisKey);
+                        analysis = null;
                     }
 
                     string matAssetPath = ownsAssets ? AssetDatabase.GetAssetPath(existingRecord.generatedMaterial) : AssetDatabase.GenerateUniqueAssetPath(Path.Combine(
